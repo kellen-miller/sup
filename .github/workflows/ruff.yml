@@ -1,0 +1,23 @@
+name: Ruff
+
+on:
+  pull_request:
+
+jobs:
+  ruff:
+    name: Format and lint
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Check formatting
+        uses: astral-sh/ruff-action@v3
+        with:
+          args: format --check .
+
+      - name: Lint
+        uses: astral-sh/ruff-action@v3
+        with:
+          args: check .

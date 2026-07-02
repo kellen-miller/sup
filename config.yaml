@@ -1,0 +1,107 @@
+aliases:
+  brew:
+    - brew-upgrade
+    - brew-cleanup
+  zimfw:
+    - zimfw-upgrade
+    - zimfw-update
+  cargo:
+    - cargo-install-update
+
+jobs:
+  - name: brew-upgrade
+    label: Homebrew upgrade
+    phase: core
+    command: ["brew", "upgrade", "--greedy", "--force"]
+    required_commands: ["brew"]
+    optional: false
+    log_name: brew-upgrade.log
+
+  - name: brew-cleanup
+    label: Homebrew cleanup
+    phase: core
+    command: ["brew", "cleanup", "--prune=all"]
+    required_commands: ["brew"]
+    optional: false
+    log_name: brew-cleanup.log
+
+  - name: zimfw-upgrade
+    label: Zim upgrade
+    phase: core
+    command: ["zimfw", "upgrade"]
+    required_commands: ["zimfw"]
+    optional: true
+    log_name: zimfw-upgrade.log
+
+  - name: zimfw-update
+    label: Zim update
+    phase: parallel
+    command: ["zimfw", "update"]
+    required_commands: ["zimfw"]
+    optional: true
+    log_name: zimfw-update.log
+
+  - name: gup
+    label: Go tools
+    phase: parallel
+    command: ["gup", "update"]
+    required_commands: ["gup"]
+    optional: true
+    log_name: gup.log
+
+  - name: gcloud
+    label: Google Cloud SDK
+    phase: parallel
+    command: ["gcloud", "components", "update", "--quiet"]
+    required_commands: ["gcloud"]
+    optional: true
+    log_name: gcloud.log
+
+  - name: mas
+    label: Mac App Store
+    phase: parallel
+    command: ["mas", "upgrade"]
+    required_commands: ["mas"]
+    optional: true
+    log_name: mas.log
+
+  - name: npm
+    label: npm globals
+    phase: parallel
+    command: ["npm", "update", "--global"]
+    required_commands: ["npm"]
+    optional: true
+    log_name: npm.log
+
+  - name: pnpm
+    label: pnpm globals
+    phase: parallel
+    command: ["sudo", "-n", "pnpm", "update", "--global"]
+    required_commands: ["sudo", "pnpm"]
+    optional: true
+    log_name: pnpm.log
+    sudo_preflight: true
+
+  - name: rustup
+    label: Rust toolchain
+    phase: parallel
+    command: ["rustup", "update"]
+    required_commands: ["rustup"]
+    optional: true
+    log_name: rustup.log
+
+  - name: cargo-install-update
+    label: Cargo installed crates
+    phase: parallel
+    command: ["cargo", "install-update", "--all", "--git"]
+    required_commands: ["cargo", "cargo-install-update"]
+    optional: true
+    log_name: cargo-install-update.log
+
+  - name: skills
+    label: Agent skills
+    phase: parallel
+    command: ["$SUP_SKILLS_UPDATE"]
+    required_env: ["SUP_SKILLS_UPDATE"]
+    optional: true
+    log_name: skills.log
