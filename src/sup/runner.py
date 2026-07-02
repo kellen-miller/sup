@@ -1,12 +1,13 @@
 from __future__ import annotations
 
+import os
 import shutil
 import subprocess
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Callable, Iterable
+from typing import Callable, Iterable, Mapping
 
 from .jobs import Job
 from .logs import cleanup_old_runs, create_run_dir
@@ -44,6 +45,7 @@ class Runner:
         sudo_preflight: Callable[[], bool] | None = None,
         retention_days: int = 30,
         log_cleanup: bool = True,
+        env: Mapping[str, str] | None = None,
     ) -> None:
         self.home = home
         self.command_runner = command_runner
@@ -54,6 +56,7 @@ class Runner:
         self.sudo_preflight = sudo_preflight or self._sudo_preflight
         self.retention_days = retention_days
         self.log_cleanup = log_cleanup
+        self.env = os.environ if env is None else env
 
     def run(
         self,
@@ -162,11 +165,15 @@ class Runner:
         return result
 
     def _missing_requirements(self, job: Job) -> list[str]:
-        missing = [
+        missing = [f"env:{name}" for name in job.required_env if not self.env.get(name)]
+        if missing:
+            return missing
+
+        missing.extend(
             command
             for command in job.required_commands
             if not self.command_exists(command)
-        ]
+        )
         missing.extend(
             str(path) for path in job.required_paths if not self.path_exists(path)
         )

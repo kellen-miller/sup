@@ -101,7 +101,7 @@ jobs:
   - name: skills
     label: Agent skills
     phase: parallel
-    command: ["$HOME/.agents/skills/update.py"]
-    required_paths: ["$HOME/.agents/skills/update.py"]
+    command: ["$SUP_SKILLS_UPDATE"]
+    required_env: ["SUP_SKILLS_UPDATE"]
     optional: true
     log_name: skills.log

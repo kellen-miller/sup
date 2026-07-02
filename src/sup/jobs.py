@@ -1,8 +1,10 @@
 from __future__ import annotations
 
+import os
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Iterable, Literal
+from string import Template
+from typing import Any, Iterable, Literal, Mapping
 
 import yaml
 
@@ -20,6 +22,7 @@ class Job:
     optional: bool
     log_name: str
     required_paths: tuple[Path, ...] = ()
+    required_env: tuple[str, ...] = ()
     sudo_preflight: bool = False
 
 
@@ -30,11 +33,16 @@ class JobsConfig:
 
 
 def config_path() -> Path:
-    return Path(__file__).resolve().parents[2] / "jobs.yaml"
+    return Path(__file__).resolve().parents[2] / "config.yaml"
 
 
-def load_jobs_config(path: Path, home: Path | None = None) -> JobsConfig:
+def load_jobs_config(
+    path: Path,
+    home: Path | None = None,
+    env: Mapping[str, str] | None = None,
+) -> JobsConfig:
     home = Path.home() if home is None else home
+    env = os.environ if env is None else env
     if not path.is_file():
         raise ValueError(f"jobs config not found: {path}")
     data = yaml.safe_load(path.read_text(encoding="utf-8"))
@@ -46,7 +54,7 @@ def load_jobs_config(path: Path, home: Path | None = None) -> JobsConfig:
     if not isinstance(jobs_data, list) or not jobs_data:
         raise ValueError("jobs config must contain at least one job")
 
-    jobs = [parse_job(item, home=home) for item in jobs_data]
+    jobs = [parse_job(item, home=home, env=env) for item in jobs_data]
     validate_jobs_config(jobs, aliases)
     return JobsConfig(jobs=jobs, aliases=aliases)
 
@@ -68,7 +76,7 @@ def parse_aliases(value: Any) -> dict[str, tuple[str, ...]]:
     return aliases
 
 
-def parse_job(value: Any, *, home: Path) -> Job:
+def parse_job(value: Any, *, home: Path, env: Mapping[str, str]) -> Job:
     if not isinstance(value, dict):
         raise ValueError("each job must be a mapping")
     name = required_str(value, "name")
@@ -76,19 +84,22 @@ def parse_job(value: Any, *, home: Path) -> Job:
     if phase not in ("core", "parallel"):
         raise ValueError(f"job {name} has invalid phase: {phase}")
     command = required_str_list(value, "command")
+    required_env = tuple(str_list(value, "required_env"))
     required_paths = tuple(
-        Path(expand_home(item, home)) for item in str_list(value, "required_paths")
+        Path(expand_placeholders(item, home, env))
+        for item in str_list(value, "required_paths")
     )
     log_name = value.get("log_name") or f"{name}.log"
     return Job(
         name=name,
         label=value.get("label") or name,
         phase=phase,
-        command=tuple(expand_home(item, home) for item in command),
+        command=tuple(expand_placeholders(item, home, env) for item in command),
         required_commands=tuple(str_list(value, "required_commands")),
         optional=bool(value.get("optional", True)),
         log_name=required_type(log_name, "log_name", str),
         required_paths=required_paths,
+        required_env=required_env,
         sudo_preflight=bool(value.get("sudo_preflight", False)),
     )
 
@@ -107,8 +118,9 @@ def validate_jobs_config(jobs: list[Job], aliases: dict[str, tuple[str, ...]]) -
             )
 
 
-def expand_home(value: str, home: Path) -> str:
-    return value.replace("$HOME", str(home))
+def expand_placeholders(value: str, home: Path, env: Mapping[str, str]) -> str:
+    variables = {**env, "HOME": str(home)}
+    return Template(value).safe_substitute(variables)
 
 
 def required_str(data: dict[str, Any], key: str) -> str:

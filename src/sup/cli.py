@@ -24,7 +24,7 @@ def build_parser() -> argparse.ArgumentParser:
         "--config",
         type=Path,
         default=config_path(),
-        help="Path to jobs YAML config.",
+        help="Path to sup YAML config.",
     )
     parser.add_argument(
         "--dry-run", action="store_true", help="Show planned jobs only."

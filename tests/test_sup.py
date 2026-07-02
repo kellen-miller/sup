@@ -39,6 +39,9 @@ class SelectionTest(unittest.TestCase):
             ],
         )
 
+    def test_default_config_path_uses_config_yaml(self):
+        self.assertEqual(config_path().name, "config.yaml")
+
     def test_selection_accepts_exact_names_and_aliases(self):
         jobs_config = load_jobs_config(config_path())
         jobs = jobs_config.jobs
@@ -70,7 +73,7 @@ class SelectionTest(unittest.TestCase):
     def test_loads_custom_jobs_from_yaml_with_home_expansion(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
-            job_file = root / "jobs.yaml"
+            job_file = root / "config.yaml"
             job_file.write_text(
                 """
 aliases:
@@ -96,9 +99,35 @@ jobs:
         )
         self.assertEqual(jobs_config.jobs[0].required_paths, (root / "bin" / "custom",))
 
+    def test_loads_custom_jobs_from_yaml_with_env_expansion(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            updater = root / "bin" / "update-skills"
+            job_file = root / "config.yaml"
+            job_file.write_text(
+                """
+jobs:
+  - name: env-job
+    phase: parallel
+    command: ["$SUP_SKILLS_UPDATE", "--quiet"]
+    required_env: ["SUP_SKILLS_UPDATE"]
+    optional: true
+""",
+                encoding="utf-8",
+            )
+
+            jobs_config = load_jobs_config(
+                job_file,
+                home=root,
+                env={"SUP_SKILLS_UPDATE": str(updater)},
+            )
+
+        self.assertEqual(jobs_config.jobs[0].command, (str(updater), "--quiet"))
+        self.assertEqual(jobs_config.jobs[0].required_env, ("SUP_SKILLS_UPDATE",))
+
     def test_config_validation_rejects_duplicate_job_names(self):
         with tempfile.TemporaryDirectory() as tmp:
-            job_file = Path(tmp) / "jobs.yaml"
+            job_file = Path(tmp) / "config.yaml"
             job_file.write_text(
                 """
 jobs:
@@ -193,6 +222,48 @@ class RunnerTest(unittest.TestCase):
 
         self.assertEqual(results[0].status, "skipped")
         self.assertIn("missing optional", results[0].reason)
+
+    def test_missing_optional_env_is_skipped(self):
+        jobs = [
+            job
+            for job in load_jobs_config(config_path(), env={}).jobs
+            if job.name == "skills"
+        ]
+        runner = Runner(
+            home=Path("/tmp/example-home"),
+            command_exists=lambda name: True,
+            path_exists=lambda path: True,
+            env={},
+            command_runner=lambda job: CommandResult(exit_code=0),
+        )
+
+        results = runner.run(jobs, dry_run=False)
+
+        self.assertEqual(results[0].status, "skipped")
+        self.assertIn("SUP_SKILLS_UPDATE", results[0].reason)
+
+    def test_present_required_env_allows_optional_job_to_run(self):
+        calls = []
+        env = {"SUP_SKILLS_UPDATE": "/tmp/update-skills"}
+        jobs = [
+            job
+            for job in load_jobs_config(config_path(), env=env).jobs
+            if job.name == "skills"
+        ]
+        runner = Runner(
+            home=Path("/tmp/example-home"),
+            command_exists=lambda name: True,
+            path_exists=lambda path: True,
+            env=env,
+            command_runner=lambda job: (
+                calls.append(job.command) or CommandResult(exit_code=0)
+            ),
+        )
+
+        results = runner.run(jobs, dry_run=False)
+
+        self.assertEqual(results[0].status, "succeeded")
+        self.assertEqual(calls, [("/tmp/update-skills",)])
 
     def test_sudo_preflight_failure_skips_optional_pnpm_command(self):
         calls = []
