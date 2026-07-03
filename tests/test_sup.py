@@ -1,4 +1,7 @@
 import io
+import signal
+import subprocess
+import sys
 import tempfile
 import unittest
 from contextlib import redirect_stdout
@@ -8,11 +11,34 @@ from unittest.mock import patch
 
 from rich.console import Console
 
-from sup.cli import main
-from sup.display import LiveDashboard, progress_bar, render_dry_run, render_summary
-from sup.jobs import config_path, load_jobs_config, resolve_job_selection
+from sup.cli import (
+    INTERRUPTED_EXIT_CODE,
+    SudoAuthenticator,
+    SudoTicketKeepalive,
+    authenticate_sudo_with_overlay,
+    has_sudo_ticket,
+    raise_keyboard_interrupt,
+    main,
+    validate_sudo_password,
+)
+from sup.display import (
+    TOKYONIGHT,
+    LiveDashboard,
+    display_command,
+    progress_bar,
+    render_dry_run,
+    render_summary,
+)
+from sup.jobs import Job, config_path, load_jobs_config, resolve_job_selection
 from sup.logs import cleanup_old_runs, create_run_dir, tail_lines
 from sup.runner import CommandResult, JobResult, Runner
+
+
+def find_line_index(lines: list[str], needle: str) -> int:
+    for index, line in enumerate(lines):
+        if needle in line:
+            return index
+    raise AssertionError(f"{needle!r} not found")
 
 
 class SelectionTest(unittest.TestCase):
@@ -38,6 +64,46 @@ class SelectionTest(unittest.TestCase):
                 "skills",
             ],
         )
+
+    def test_brew_upgrade_preflights_sudo_for_cask_scripts(self):
+        jobs_config = load_jobs_config(config_path())
+        brew_upgrade = next(
+            job for job in jobs_config.jobs if job.name == "brew-upgrade"
+        )
+
+        self.assertTrue(brew_upgrade.sudo_preflight)
+        self.assertIn("sudo", brew_upgrade.required_commands)
+
+    def test_mas_preflights_sudo_for_update_subprocesses(self):
+        jobs_config = load_jobs_config(config_path())
+        mas = next(job for job in jobs_config.jobs if job.name == "mas")
+
+        self.assertTrue(mas.sudo_preflight)
+        self.assertIn("sudo", mas.required_commands)
+
+    def test_pnpm_sets_global_bin_path_without_sudo(self):
+        home = Path("/tmp/example-home")
+        jobs_config = load_jobs_config(
+            config_path(),
+            home=home,
+            env={"PATH": "/opt/homebrew/bin:/usr/bin"},
+        )
+        pnpm = next(job for job in jobs_config.jobs if job.name == "pnpm")
+
+        self.assertEqual(
+            pnpm.command,
+            (
+                "env",
+                f"PNPM_HOME={home}/Library/pnpm",
+                f"PATH=/opt/homebrew/bin:/opt/homebrew/sbin:/usr/local/bin:/usr/local/sbin:/usr/bin:/bin:/usr/sbin:/sbin:{home}/Library/pnpm/bin:{home}/Library/pnpm",
+                "pnpm",
+                "update",
+                "--global",
+            ),
+        )
+        self.assertFalse(pnpm.sudo_preflight)
+        self.assertNotIn("sudo", pnpm.required_commands)
+        self.assertEqual(pnpm.required_paths, (home / "Library" / "pnpm" / "bin",))
 
     def test_default_config_path_uses_config_yaml(self):
         self.assertEqual(config_path().name, "config.yaml")
@@ -223,7 +289,7 @@ class RunnerTest(unittest.TestCase):
         self.assertEqual(results[0].status, "skipped")
         self.assertIn("missing optional", results[0].reason)
 
-    def test_missing_optional_env_is_skipped(self):
+    def test_missing_optional_path_is_skipped(self):
         jobs = [
             job
             for job in load_jobs_config(config_path(), env={}).jobs
@@ -232,7 +298,7 @@ class RunnerTest(unittest.TestCase):
         runner = Runner(
             home=Path("/tmp/example-home"),
             command_exists=lambda name: True,
-            path_exists=lambda path: True,
+            path_exists=lambda path: False,
             env={},
             command_runner=lambda job: CommandResult(exit_code=0),
         )
@@ -240,35 +306,53 @@ class RunnerTest(unittest.TestCase):
         results = runner.run(jobs, dry_run=False)
 
         self.assertEqual(results[0].status, "skipped")
-        self.assertIn("SUP_SKILLS_UPDATE", results[0].reason)
+        self.assertIn(".agents/skills/update.py", results[0].reason)
 
-    def test_present_required_env_allows_optional_job_to_run(self):
+    def test_skills_job_uses_agents_update_script(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            home = Path(tmp)
+            updater = home / ".agents" / "skills" / "update.py"
+            jobs = [
+                job
+                for job in load_jobs_config(config_path(), home=home).jobs
+                if job.name == "skills"
+            ]
+
+        self.assertEqual(jobs[0].command, ("python3", str(updater)))
+        self.assertEqual(jobs[0].required_commands, ("python3",))
+        self.assertEqual(jobs[0].required_paths, (updater,))
+        self.assertEqual(jobs[0].required_env, ())
+
+    def test_present_skills_updater_allows_optional_job_to_run(self):
         calls = []
-        env = {"SUP_SKILLS_UPDATE": "/tmp/update-skills"}
-        jobs = [
-            job
-            for job in load_jobs_config(config_path(), env=env).jobs
-            if job.name == "skills"
-        ]
-        runner = Runner(
-            home=Path("/tmp/example-home"),
-            command_exists=lambda name: True,
-            path_exists=lambda path: True,
-            env=env,
-            command_runner=lambda job: (
-                calls.append(job.command) or CommandResult(exit_code=0)
-            ),
-        )
+        with tempfile.TemporaryDirectory() as tmp:
+            home = Path(tmp)
+            jobs = [
+                job
+                for job in load_jobs_config(config_path(), home=home).jobs
+                if job.name == "skills"
+            ]
+            runner = Runner(
+                home=Path("/tmp/example-home"),
+                command_exists=lambda name: True,
+                path_exists=lambda path: True,
+                command_runner=lambda job: (
+                    calls.append(job.command) or CommandResult(exit_code=0)
+                ),
+            )
 
-        results = runner.run(jobs, dry_run=False)
+            results = runner.run(jobs, dry_run=False)
 
         self.assertEqual(results[0].status, "succeeded")
-        self.assertEqual(calls, [("/tmp/update-skills",)])
+        self.assertEqual(
+            calls,
+            [("python3", str(home / ".agents" / "skills" / "update.py"))],
+        )
 
-    def test_sudo_preflight_failure_skips_optional_pnpm_command(self):
+    def test_sudo_preflight_failure_skips_optional_mas_command(self):
         calls = []
         jobs = [
-            job for job in load_jobs_config(config_path()).jobs if job.name == "pnpm"
+            job for job in load_jobs_config(config_path()).jobs if job.name == "mas"
         ]
         runner = Runner(
             home=Path("/tmp/example-home"),
@@ -287,7 +371,7 @@ class RunnerTest(unittest.TestCase):
         self.assertIn("sudo authentication", results[0].reason)
         self.assertEqual(Runner.exit_code_for(results), 0)
 
-    def test_sudo_preflight_uses_non_interactive_validation(self):
+    def test_sudo_preflight_uses_sup_password_prompt(self):
         runner = Runner(home=Path("/tmp/example-home"))
 
         with patch("sup.runner.subprocess.run") as run:
@@ -295,7 +379,10 @@ class RunnerTest(unittest.TestCase):
 
             self.assertTrue(runner._sudo_preflight())
 
-        run.assert_called_once_with(["sudo", "-n", "-v"], check=False)
+        run.assert_called_once_with(
+            ["sudo", "-p", "sup sudo password: ", "-v"],
+            check=False,
+        )
 
     def test_missing_cargo_install_update_subcommand_is_skipped(self):
         jobs = [
@@ -338,6 +425,41 @@ class RunnerTest(unittest.TestCase):
 
         self.assertEqual(events, [("rustup", "running"), ("rustup", "succeeded")])
 
+    def test_runner_emits_subprocess_output_updates(self):
+        events = []
+        job = Job(
+            name="example",
+            label="Example",
+            phase="core",
+            command=(
+                sys.executable,
+                "-c",
+                "print('step one'); print('step two')",
+            ),
+            required_commands=(),
+            optional=True,
+            log_name="example.log",
+        )
+
+        with tempfile.TemporaryDirectory() as tmp:
+            runner = Runner(
+                home=Path(tmp),
+                command_exists=lambda name: True,
+                path_exists=lambda path: True,
+            )
+
+            results = runner.run(
+                [job],
+                dry_run=False,
+                on_update=lambda name, status, result=None, output=None: events.append(
+                    (name, status, output)
+                ),
+            )
+
+        self.assertEqual(results[0].status, "succeeded")
+        self.assertIn(("example", "running", "step one"), events)
+        self.assertIn(("example", "running", "step two"), events)
+
     def test_failed_job_makes_runner_unsuccessful(self):
         def fake_runner(job):
             return CommandResult(exit_code=7)
@@ -357,6 +479,53 @@ class RunnerTest(unittest.TestCase):
         self.assertEqual(results[0].status, "failed")
         self.assertEqual(Runner.exit_code_for(results), 1)
 
+    def test_stop_terminates_active_subprocesses(self):
+        class FakeProcess:
+            def __init__(self):
+                self.terminated = False
+                self.killed = False
+                self.waited = False
+
+            def poll(self):
+                return None
+
+            def terminate(self):
+                self.terminated = True
+
+            def wait(self, timeout=None):
+                self.waited = True
+                return -15
+
+            def kill(self):
+                self.killed = True
+
+        process = FakeProcess()
+        runner = Runner(home=Path("/tmp/example-home"))
+        runner._track_process(process)
+
+        runner.stop()
+
+        self.assertTrue(process.terminated)
+        self.assertTrue(process.waited)
+        self.assertFalse(process.killed)
+
+    def test_parallel_interrupt_requests_runner_stop(self):
+        jobs = [
+            job for job in load_jobs_config(config_path()).jobs if job.name == "rustup"
+        ]
+        runner = Runner(
+            home=Path("/tmp/example-home"),
+            command_exists=lambda name: True,
+            path_exists=lambda path: True,
+            command_runner=lambda job: (_ for _ in ()).throw(KeyboardInterrupt),
+        )
+
+        with patch.object(runner, "stop") as stop:
+            with self.assertRaises(KeyboardInterrupt):
+                runner.run(jobs, dry_run=False)
+
+        stop.assert_called_once_with()
+
 
 class CliTest(unittest.TestCase):
     def test_list_prints_job_names(self):
@@ -369,8 +538,228 @@ class CliTest(unittest.TestCase):
         self.assertIn("brew-upgrade", out.getvalue())
         self.assertIn("skills", out.getvalue())
 
+    def test_sudo_overlay_reads_password_and_clears(self):
+        events = []
+        job = Job(
+            name="brew-upgrade",
+            label="Homebrew upgrade",
+            phase="core",
+            command=("brew", "upgrade"),
+            required_commands=("brew", "sudo"),
+            optional=False,
+            log_name="brew-upgrade.log",
+            sudo_preflight=True,
+        )
+
+        class FakeDashboard:
+            def show_auth_overlay(self, jobs, *, error=None):
+                events.append(("show", tuple(job.name for job in jobs), error))
+
+            def clear_auth_overlay(self):
+                events.append(("clear",))
+
+        ticket_checks = iter([False, True])
+        ok = authenticate_sudo_with_overlay(
+            [job],
+            dashboard=FakeDashboard(),
+            sudo_ticket_available=lambda: next(ticket_checks),
+            password_reader=lambda: "secret",
+            validator=lambda password: password == "secret",
+        )
+
+        self.assertTrue(ok)
+        self.assertEqual(
+            events,
+            [
+                ("show", ("brew-upgrade",), None),
+                ("clear",),
+            ],
+        )
+
+    def test_sudo_overlay_confirms_ticket_after_validation(self):
+        job = Job(
+            name="pnpm",
+            label="pnpm globals",
+            phase="parallel",
+            command=("sudo", "-n", "pnpm", "update", "--global"),
+            required_commands=("sudo", "pnpm"),
+            optional=True,
+            log_name="pnpm.log",
+            sudo_preflight=True,
+        )
+        ticket_checks = iter([False, False])
+
+        class FakeDashboard:
+            console = Console(file=io.StringIO())
+
+            def show_auth_overlay(self, jobs, *, error=None):
+                pass
+
+            def clear_auth_overlay(self):
+                pass
+
+        ok = authenticate_sudo_with_overlay(
+            [job],
+            dashboard=FakeDashboard(),
+            sudo_ticket_available=lambda: next(ticket_checks),
+            password_reader=lambda: "secret",
+            validator=lambda password: True,
+            max_attempts=1,
+        )
+
+        self.assertFalse(ok)
+
+    def test_validate_sudo_password_uses_stdin_promptless_sudo(self):
+        with patch("sup.cli.subprocess.run") as run:
+            run.return_value.returncode = 0
+
+            self.assertTrue(validate_sudo_password("secret"))
+
+        run.assert_called_once_with(
+            ["sudo", "-S", "-p", "", "-v"],
+            input="secret\n",
+            text=True,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            check=False,
+        )
+
+    def test_has_sudo_ticket_checks_real_noninteractive_command(self):
+        with patch("sup.cli.subprocess.run") as run:
+            run.return_value.returncode = 0
+
+            self.assertTrue(has_sudo_ticket())
+
+        run.assert_called_once_with(
+            ["sudo", "-n", "true"],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            check=False,
+        )
+
+    def test_sudo_keepalive_refreshes_ticket_until_stopped(self):
+        refreshes = []
+        sleeps = []
+        keepalive = SudoTicketKeepalive(
+            refresh=lambda: refreshes.append("refresh") or True,
+            sleep=lambda seconds: sleeps.append(seconds),
+            interval=30,
+        )
+
+        keepalive.run_once()
+        keepalive.stop()
+
+        self.assertEqual(refreshes, ["refresh"])
+        self.assertEqual(sleeps, [30])
+
+    def test_sudo_authenticator_prompts_again_after_ticket_expires(self):
+        events = []
+        job = Job(
+            name="pnpm",
+            label="pnpm globals",
+            phase="parallel",
+            command=("sudo", "-n", "pnpm", "update", "--global"),
+            required_commands=("sudo", "pnpm"),
+            optional=True,
+            log_name="pnpm.log",
+            sudo_preflight=True,
+        )
+
+        class FakeDashboard:
+            console = Console(file=io.StringIO())
+
+            def show_auth_overlay(self, jobs, *, error=None):
+                events.append(("show", tuple(job.name for job in jobs), error))
+
+            def clear_auth_overlay(self):
+                events.append(("clear",))
+
+        ticket_checks = iter([False, True, False, True])
+        passwords = iter(["first", "second"])
+        authenticator = SudoAuthenticator(
+            [job],
+            dashboard=FakeDashboard(),
+            sudo_ticket_available=lambda: next(ticket_checks),
+            password_reader=lambda: next(passwords),
+            validator=lambda password: password in {"first", "second"},
+        )
+
+        self.assertTrue(authenticator.authenticate())
+        self.assertTrue(authenticator.authenticate())
+        self.assertEqual(
+            events,
+            [
+                ("show", ("pnpm",), None),
+                ("clear",),
+                ("show", ("pnpm",), None),
+                ("clear",),
+            ],
+        )
+
+    def test_main_reuses_prompting_sudo_callback_during_run(self):
+        out = io.StringIO()
+        with (
+            patch("sup.cli.Runner") as runner_class,
+            patch("sup.cli.SudoAuthenticator") as authenticator_class,
+            patch("sup.cli.SudoTicketKeepalive"),
+            redirect_stdout(out),
+        ):
+            runner = runner_class.return_value
+            authenticator = authenticator_class.return_value
+            authenticator.authenticate.side_effect = [True, True, True]
+            runner_class.exit_code_for.return_value = 0
+
+            def run_jobs(_jobs, *, on_update):
+                self.assertTrue(runner.sudo_preflight())
+                self.assertTrue(runner.sudo_preflight())
+                return []
+
+            runner.run.side_effect = run_jobs
+
+            code = main(["--only", "pnpm"])
+
+        self.assertEqual(code, 0)
+        self.assertEqual(authenticator.authenticate.call_count, 3)
+
+    def test_keyboard_interrupt_stops_runner_and_returns_130(self):
+        out = io.StringIO()
+
+        with (
+            patch("sup.cli.Runner") as runner_class,
+            patch("sup.cli.SudoTicketKeepalive"),
+            redirect_stdout(out),
+        ):
+            runner = runner_class.return_value
+            runner.run.side_effect = KeyboardInterrupt
+
+            code = main(["--only", "rustup"])
+
+        self.assertEqual(code, INTERRUPTED_EXIT_CODE)
+        runner.stop.assert_called_once_with()
+        self.assertIn("Run interrupted", out.getvalue())
+        self.assertNotIn("Traceback", out.getvalue())
+
+    def test_sigterm_uses_keyboard_interrupt_path(self):
+        with self.assertRaises(KeyboardInterrupt):
+            raise_keyboard_interrupt(signal.SIGTERM, None)
+
 
 class DisplayTest(unittest.TestCase):
+    def render_dashboard_lines(
+        self,
+        dashboard: LiveDashboard,
+        *,
+        width: int = 160,
+    ) -> list[str]:
+        console = Console(
+            file=io.StringIO(),
+            force_terminal=True,
+            width=width,
+            color_system=None,
+        )
+        console.print(dashboard.render())
+        return console.file.getvalue().splitlines()
+
     def test_dry_run_renders_mission_control_theme(self):
         jobs = load_jobs_config(config_path()).jobs[:2]
         console = Console(file=io.StringIO(), force_terminal=True, width=120)
@@ -391,7 +780,10 @@ class DisplayTest(unittest.TestCase):
         console = Console(file=io.StringIO(), force_terminal=True, width=120)
         dashboard = LiveDashboard(jobs, console=console)
 
-        dashboard.update("rustup", "running")
+        dashboard.update("rustup", "running", output="older preface")
+        dashboard.update("rustup", "running", output="syncing channel")
+        dashboard.update("rustup", "running", output="downloading rustc")
+        dashboard.update("rustup", "running", output="installing rustc")
         renderable = dashboard.render()
         console.print(renderable)
         output = console.file.getvalue()
@@ -400,9 +792,154 @@ class DisplayTest(unittest.TestCase):
         self.assertIn("running", output)
         self.assertIn("░", output)
         self.assertIn("rustup", output)
-        self.assertIn("sup", output)
+        self.assertNotIn("older preface", output)
+        self.assertIn("syncing channel", output)
+        self.assertIn("downloading rustc", output)
+        self.assertIn("installing rustc", output)
         self.assertNotIn("TOKYONIGHT MISSION CONTROL", output)
         self.assertNotIn("SUP ORBITAL COMMAND", output)
+
+    def test_display_command_shortens_long_env_assignments(self):
+        jobs = [
+            job for job in load_jobs_config(config_path()).jobs if job.name == "pnpm"
+        ]
+        command = display_command(jobs[0].command)
+
+        self.assertIn(
+            "PATH=/opt/homebrew/bin:/opt/homebrew/sbin:…:~/Library/pnpm", command
+        )
+        self.assertNotIn("/usr/local/bin:/usr/local/sbin", command)
+
+    def test_live_dashboard_omits_duplicate_sup_chrome(self):
+        jobs = [
+            Job(
+                name="example",
+                label="Example",
+                phase="core",
+                command=("example", "update"),
+                required_commands=(),
+                optional=True,
+                log_name="example.log",
+            )
+        ]
+        console = Console(file=io.StringIO(), force_terminal=True, width=120)
+        dashboard = LiveDashboard(jobs, console=console)
+
+        renderable = dashboard.render()
+        console.print(renderable)
+        output = console.file.getvalue()
+
+        self.assertIsNone(renderable.title)
+        self.assertNotIn("sup", output)
+
+    def test_live_dashboard_renders_sudo_auth_overlay(self):
+        jobs = [
+            Job(
+                name="brew-upgrade",
+                label="Homebrew upgrade",
+                phase="core",
+                command=("brew", "upgrade"),
+                required_commands=("brew", "sudo"),
+                optional=False,
+                log_name="brew-upgrade.log",
+                sudo_preflight=True,
+            )
+        ]
+        console = Console(file=io.StringIO(), force_terminal=True, width=120)
+        dashboard = LiveDashboard(jobs, console=console)
+
+        dashboard.show_auth_overlay(jobs)
+        console.print(dashboard.render())
+        output = console.file.getvalue()
+
+        self.assertIn("sudo authentication required", output)
+        self.assertIn("brew-upgrade", output)
+        self.assertIn("Password", output)
+        self.assertIn("hidden input active", output)
+        self.assertIn("\x1b[2m", output)
+
+    def test_sudo_auth_overlay_does_not_reflow_dashboard(self):
+        jobs = load_jobs_config(config_path()).jobs
+        base_dashboard = LiveDashboard(
+            jobs,
+            console=Console(file=io.StringIO(), force_terminal=True, width=160),
+        )
+        overlay_dashboard = LiveDashboard(
+            jobs,
+            console=Console(file=io.StringIO(), force_terminal=True, width=160),
+        )
+        overlay_dashboard.show_auth_overlay([job for job in jobs if job.sudo_preflight])
+
+        base_lines = self.render_dashboard_lines(base_dashboard, width=160)
+        overlay_lines = self.render_dashboard_lines(overlay_dashboard, width=160)
+
+        self.assertEqual(len(overlay_lines), len(base_lines))
+        self.assertEqual(
+            find_line_index(base_lines, "brew-upgrade"),
+            find_line_index(overlay_lines, "brew-upgrade"),
+        )
+        self.assertEqual(
+            find_line_index(base_lines, "skills"),
+            find_line_index(overlay_lines, "skills"),
+        )
+        prompt_line = overlay_lines[
+            find_line_index(overlay_lines, "sudo authentication required")
+        ]
+        prompt_start = prompt_line.index("sudo authentication required")
+        self.assertGreater(prompt_start, 45)
+        self.assertLess(prompt_start, 90)
+
+    def test_live_dashboard_refreshes_only_on_updates(self):
+        jobs = [
+            Job(
+                name="example",
+                label="Example",
+                phase="core",
+                command=("example", "update"),
+                required_commands=(),
+                optional=True,
+                log_name="example.log",
+            )
+        ]
+        console = Console(file=io.StringIO(), force_terminal=True, width=120)
+        dashboard = LiveDashboard(jobs, console=console)
+
+        with patch("sup.display.Live") as live:
+            with dashboard:
+                dashboard.update("example", "running")
+
+        live.assert_called_once_with(dashboard, console=console, auto_refresh=False)
+        live.return_value.update.assert_called_once_with(dashboard, refresh=True)
+
+    def test_live_dashboard_throttles_output_refreshes(self):
+        jobs = [
+            Job(
+                name="example",
+                label="Example",
+                phase="core",
+                command=("example", "update"),
+                required_commands=(),
+                optional=True,
+                log_name="example.log",
+            )
+        ]
+        console = Console(file=io.StringIO(), force_terminal=True, width=120)
+        now = 0.0
+        dashboard = LiveDashboard(jobs, console=console, clock=lambda: now)
+
+        with patch("sup.display.Live") as live:
+            with dashboard:
+                dashboard.update("example", "running")
+                dashboard.update("example", "running", output="first line")
+                dashboard.update("example", "running", output="second line")
+
+        refresh_values = [
+            call.kwargs["refresh"] for call in live.return_value.update.call_args_list
+        ]
+        self.assertEqual(refresh_values, [True, True, False])
+
+    def test_muted_palette_is_readable_on_dim_backgrounds(self):
+        self.assertEqual(TOKYONIGHT["muted"], "#8f97c7")
 
     def test_running_progress_bar_animates_by_frame(self):
         first = progress_bar("running", width=12, frame=0).plain

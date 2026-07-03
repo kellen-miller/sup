@@ -3,6 +3,7 @@ from __future__ import annotations
 import os
 import shutil
 import subprocess
+import threading
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
@@ -31,7 +32,8 @@ class JobResult:
 CommandRunner = Callable[[Job], CommandResult]
 CommandExists = Callable[[str], bool]
 PathExists = Callable[[Path], bool]
-StatusCallback = Callable[[str, str, JobResult | None], None]
+StatusCallback = Callable[..., None]
+STOP_TIMEOUT_SECONDS = 1.0
 
 
 class Runner:
@@ -57,6 +59,16 @@ class Runner:
         self.retention_days = retention_days
         self.log_cleanup = log_cleanup
         self.env = os.environ if env is None else env
+        self._stop_requested = threading.Event()
+        self._processes: set[subprocess.Popen[str]] = set()
+        self._processes_lock = threading.Lock()
+
+    def stop(self) -> None:
+        self._stop_requested.set()
+        with self._processes_lock:
+            processes = list(self._processes)
+        for process in processes:
+            self._terminate_process(process)
 
     def run(
         self,
@@ -81,16 +93,37 @@ class Runner:
             )
 
         results: list[JobResult] = []
-        for job in [job for job in jobs if job.phase == "core"]:
-            results.append(self._run_one(job, run_dir, on_update=on_update))
+        try:
+            for job in [job for job in jobs if job.phase == "core"]:
+                results.append(self._run_one(job, run_dir, on_update=on_update))
 
-        parallel_jobs = [job for job in jobs if job.phase == "parallel"]
-        with ThreadPoolExecutor(max_workers=max(1, len(parallel_jobs))) as executor:
-            futures = {
-                executor.submit(self._run_one, job, run_dir, on_update): job
-                for job in parallel_jobs
-            }
-            parallel_results = [future.result() for future in as_completed(futures)]
+            parallel_jobs = [job for job in jobs if job.phase == "parallel"]
+            parallel_results: list[JobResult] = []
+            if parallel_jobs:
+                executor = ThreadPoolExecutor(max_workers=len(parallel_jobs))
+                wait_for_executor = True
+                futures = {}
+                try:
+                    futures = {
+                        executor.submit(self._run_one, job, run_dir, on_update): job
+                        for job in parallel_jobs
+                    }
+                    parallel_results = [
+                        future.result() for future in as_completed(futures)
+                    ]
+                except KeyboardInterrupt:
+                    wait_for_executor = False
+                    for future in futures:
+                        future.cancel()
+                    raise
+                finally:
+                    executor.shutdown(
+                        wait=wait_for_executor,
+                        cancel_futures=not wait_for_executor,
+                    )
+        except KeyboardInterrupt:
+            self.stop()
+            raise
         results.extend(
             sorted(
                 parallel_results,
@@ -151,7 +184,7 @@ class Runner:
         command_result = (
             self.command_runner(job)
             if self.command_runner is not None
-            else self._run_subprocess(job, log_path)
+            else self._run_subprocess(job, log_path, on_update=on_update)
         )
         status = "succeeded" if command_result.exit_code == 0 else "failed"
         result = JobResult(
@@ -179,24 +212,54 @@ class Runner:
         )
         return missing
 
-    def _run_subprocess(self, job: Job, log_path: Path) -> CommandResult:
+    def _run_subprocess(
+        self,
+        job: Job,
+        log_path: Path,
+        *,
+        on_update: StatusCallback | None = None,
+    ) -> CommandResult:
         with log_path.open("w", encoding="utf-8", errors="replace") as log:
-            process = subprocess.Popen(
+            with subprocess.Popen(
                 job.command,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.STDOUT,
                 text=True,
                 encoding="utf-8",
                 errors="replace",
-            )
-            assert process.stdout is not None
-            for line in process.stdout:
-                log.write(line)
-                log.flush()
-            return CommandResult(process.wait())
+            ) as process:
+                self._track_process(process)
+                try:
+                    assert process.stdout is not None
+                    if self._stop_requested.is_set():
+                        self._terminate_process(process)
+                    for line in process.stdout:
+                        log.write(line)
+                        log.flush()
+                        output = line.strip()
+                        if output:
+                            self._emit(
+                                on_update,
+                                job.name,
+                                "running",
+                                None,
+                                output=output,
+                            )
+                    return CommandResult(process.wait())
+                except KeyboardInterrupt:
+                    self._terminate_process(process)
+                    raise
+                finally:
+                    self._untrack_process(process)
 
     def _sudo_preflight(self) -> bool:
-        return subprocess.run(["sudo", "-n", "-v"], check=False).returncode == 0
+        return (
+            subprocess.run(
+                ["sudo", "-p", "sup sudo password: ", "-v"],
+                check=False,
+            ).returncode
+            == 0
+        )
 
     @staticmethod
     def _emit(
@@ -204,6 +267,35 @@ class Runner:
         name: str,
         status: str,
         result: JobResult | None,
+        *,
+        output: str | None = None,
     ) -> None:
         if callback is not None:
-            callback(name, status, result)
+            if output is None:
+                callback(name, status, result)
+            else:
+                callback(name, status, result, output)
+
+    def _track_process(self, process: subprocess.Popen[str]) -> None:
+        with self._processes_lock:
+            self._processes.add(process)
+
+    def _untrack_process(self, process: subprocess.Popen[str]) -> None:
+        with self._processes_lock:
+            self._processes.discard(process)
+
+    @staticmethod
+    def _terminate_process(process: subprocess.Popen[str]) -> None:
+        if process.poll() is not None:
+            return
+        try:
+            process.terminate()
+            process.wait(timeout=STOP_TIMEOUT_SECONDS)
+        except ProcessLookupError:
+            return
+        except subprocess.TimeoutExpired:
+            try:
+                process.kill()
+                process.wait(timeout=STOP_TIMEOUT_SECONDS)
+            except (ProcessLookupError, subprocess.TimeoutExpired):
+                return
