@@ -81,7 +81,7 @@ class SelectionTest(unittest.TestCase):
         self.assertTrue(mas.sudo_preflight)
         self.assertIn("sudo", mas.required_commands)
 
-    def test_pnpm_sets_global_bin_path_without_sudo(self):
+    def test_pnpm_updates_globals_without_sudo(self):
         home = Path("/tmp/example-home")
         jobs_config = load_jobs_config(
             config_path(),
@@ -93,9 +93,6 @@ class SelectionTest(unittest.TestCase):
         self.assertEqual(
             pnpm.command,
             (
-                "env",
-                f"PNPM_HOME={home}/Library/pnpm",
-                f"PATH=/opt/homebrew/bin:/opt/homebrew/sbin:/usr/local/bin:/usr/local/sbin:/usr/bin:/bin:/usr/sbin:/sbin:{home}/Library/pnpm/bin:{home}/Library/pnpm",
                 "pnpm",
                 "update",
                 "--global",
@@ -103,7 +100,7 @@ class SelectionTest(unittest.TestCase):
         )
         self.assertFalse(pnpm.sudo_preflight)
         self.assertNotIn("sudo", pnpm.required_commands)
-        self.assertEqual(pnpm.required_paths, (home / "Library" / "pnpm" / "bin",))
+        self.assertEqual(pnpm.required_paths, ())
 
     def test_default_config_path_uses_config_yaml(self):
         self.assertEqual(config_path().name, "config.yaml")
@@ -800,10 +797,13 @@ class DisplayTest(unittest.TestCase):
         self.assertNotIn("SUP ORBITAL COMMAND", output)
 
     def test_display_command_shortens_long_env_assignments(self):
-        jobs = [
-            job for job in load_jobs_config(config_path()).jobs if job.name == "pnpm"
-        ]
-        command = display_command(jobs[0].command)
+        command = display_command(
+            (
+                "env",
+                "PATH=/opt/homebrew/bin:/opt/homebrew/sbin:/usr/local/bin:/usr/local/sbin:/usr/bin:/bin:~/Library/pnpm",
+                "example",
+            )
+        )
 
         self.assertIn(
             "PATH=/opt/homebrew/bin:/opt/homebrew/sbin:…:~/Library/pnpm", command

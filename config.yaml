@@ -78,17 +78,8 @@ jobs:
   - name: pnpm
     label: pnpm globals
     phase: parallel
-    command:
-      [
-        "env",
-        "PNPM_HOME=$HOME/Library/pnpm",
-        "PATH=/opt/homebrew/bin:/opt/homebrew/sbin:/usr/local/bin:/usr/local/sbin:/usr/bin:/bin:/usr/sbin:/sbin:$HOME/Library/pnpm/bin:$HOME/Library/pnpm",
-        "pnpm",
-        "update",
-        "--global",
-      ]
+    command: ["pnpm", "update", "--global"]
     required_commands: ["pnpm"]
-    required_paths: ["$HOME/Library/pnpm/bin"]
     optional: true
     log_name: pnpm.log
 
