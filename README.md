@@ -2,7 +2,7 @@
 
 `sup` is a configurable local update runner. It executes jobs from a YAML
 config, captures per-job logs, and shows a Rich terminal dashboard while work is
-running.
+running. The dashboard shows a bounded rolling output tail for each active job.
 
 ## Install
 
@@ -61,20 +61,21 @@ Supported job keys:
 - `optional`: skipped when requirements are missing if `true`; failed if
   `false`.
 - `log_name`: filename under the current run log directory.
-- `sudo_preflight`: run `sudo -n -v` before executing the job.
+- `sudo_preflight`: authenticate sudo through the dashboard overlay before
+  executing the job and keep the ticket alive while selected jobs run.
 
 `$HOME`, `$VAR`, and `${VAR}` placeholders in `command` and `required_paths`
 are expanded when the config is loaded. Missing required environment variables
 cause optional jobs to be skipped before execution.
 
-The default `skills` job is portable by design:
+The default `skills` job runs the user agent-skill updater when it exists:
 
 ```bash
-export SUP_SKILLS_UPDATE="$HOME/bin/update-skills"
 uv run --project . sup --only skills
 ```
 
-If `SUP_SKILLS_UPDATE` is unset, the `skills` job is skipped.
+It calls `python3 $HOME/.agents/skills/update.py`. If that updater is missing,
+the optional `skills` job is skipped.
 
 ## Logs
 

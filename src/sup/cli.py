@@ -1,14 +1,25 @@
 from __future__ import annotations
 
 import argparse
+import signal
+import subprocess
 import sys
+import threading
+from collections.abc import Callable, Iterable
 from pathlib import Path
 
 from rich.console import Console
 
 from .display import LiveDashboard, render_dry_run, render_summary
-from .jobs import config_path, load_jobs_config, resolve_job_selection
+from .jobs import Job, config_path, load_jobs_config, resolve_job_selection
 from .runner import Runner
+
+
+PasswordReader = Callable[[], str]
+SudoValidator = Callable[[str], bool]
+SudoTicketCheck = Callable[[], bool]
+Sleeper = Callable[[float], object]
+INTERRUPTED_EXIT_CODE = 130
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -80,15 +91,166 @@ def main(argv: list[str] | None = None) -> int:
         retention_days=args.log_retention_days,
         log_cleanup=not args.no_log_cleanup,
     )
-    sudo_ok: bool | None = None
-    if any(job.sudo_preflight for job in selected):
-        sudo_ok = runner.sudo_preflight()
-        runner.sudo_preflight = lambda: bool(sudo_ok)
-
-    with LiveDashboard(selected, console=console) as dashboard:
-        results = runner.run(selected, on_update=dashboard.update)
+    previous_sigterm = signal.signal(signal.SIGTERM, raise_keyboard_interrupt)
+    try:
+        with LiveDashboard(selected, console=console) as dashboard:
+            sudo_jobs = [job for job in selected if job.sudo_preflight]
+            authenticator = SudoAuthenticator(sudo_jobs, dashboard=dashboard)
+            sudo_ok = authenticator.authenticate()
+            runner.sudo_preflight = (
+                authenticator.authenticate if sudo_ok else lambda: False
+            )
+            keepalive = SudoTicketKeepalive() if sudo_jobs and sudo_ok else None
+            if keepalive is not None:
+                keepalive.start()
+            try:
+                results = runner.run(selected, on_update=dashboard.update)
+            finally:
+                if keepalive is not None:
+                    keepalive.stop()
+    except KeyboardInterrupt:
+        runner.stop()
+        console.print("\n[bold yellow]Run interrupted; stopping active jobs.[/]")
+        return INTERRUPTED_EXIT_CODE
+    finally:
+        signal.signal(signal.SIGTERM, previous_sigterm)
     render_summary(results, console=console, tail_count=args.tail)
     return Runner.exit_code_for(results)
+
+
+def raise_keyboard_interrupt(_signum: int, _frame: object | None) -> None:
+    raise KeyboardInterrupt
+
+
+class SudoAuthenticator:
+    def __init__(
+        self,
+        sudo_jobs: Iterable[Job],
+        *,
+        dashboard: LiveDashboard,
+        sudo_ticket_available: SudoTicketCheck | None = None,
+        password_reader: PasswordReader | None = None,
+        validator: SudoValidator | None = None,
+        max_attempts: int = 3,
+    ) -> None:
+        self.jobs = tuple(sudo_jobs)
+        self.dashboard = dashboard
+        self.sudo_ticket_available = sudo_ticket_available
+        self.password_reader = password_reader
+        self.validator = validator
+        self.max_attempts = max_attempts
+        self._lock = threading.Lock()
+
+    def authenticate(self) -> bool:
+        if not self.jobs:
+            return True
+        with self._lock:
+            return authenticate_sudo_with_overlay(
+                self.jobs,
+                dashboard=self.dashboard,
+                sudo_ticket_available=self.sudo_ticket_available,
+                password_reader=self.password_reader,
+                validator=self.validator,
+                max_attempts=self.max_attempts,
+            )
+
+
+def authenticate_sudo_with_overlay(
+    sudo_jobs: Iterable[Job],
+    *,
+    dashboard: LiveDashboard,
+    sudo_ticket_available: SudoTicketCheck | None = None,
+    password_reader: PasswordReader | None = None,
+    validator: SudoValidator | None = None,
+    max_attempts: int = 3,
+) -> bool:
+    jobs = list(sudo_jobs)
+    if not jobs:
+        return True
+
+    sudo_ticket_available = sudo_ticket_available or has_sudo_ticket
+    if sudo_ticket_available():
+        return True
+
+    password_reader = password_reader or (
+        lambda: dashboard.console.input("", password=True)
+    )
+    validator = validator or validate_sudo_password
+    error: str | None = None
+    for _ in range(max_attempts):
+        dashboard.show_auth_overlay(jobs, error=error)
+        password = password_reader()
+        if validator(password) and sudo_ticket_available():
+            dashboard.clear_auth_overlay()
+            return True
+        error = "Authentication failed. Try again."
+
+    dashboard.clear_auth_overlay()
+    return False
+
+
+def has_sudo_ticket() -> bool:
+    try:
+        result = subprocess.run(
+            ["sudo", "-n", "true"],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            check=False,
+        )
+    except FileNotFoundError:
+        return False
+    return result.returncode == 0
+
+
+def validate_sudo_password(password: str) -> bool:
+    try:
+        result = subprocess.run(
+            ["sudo", "-S", "-p", "", "-v"],
+            input=f"{password}\n",
+            text=True,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            check=False,
+        )
+    except FileNotFoundError:
+        return False
+    return result.returncode == 0
+
+
+class SudoTicketKeepalive:
+    def __init__(
+        self,
+        *,
+        refresh: SudoTicketCheck | None = None,
+        sleep: Sleeper | None = None,
+        interval: float = 60,
+    ) -> None:
+        self.refresh = refresh or has_sudo_ticket
+        self.interval = interval
+        self._stop = threading.Event()
+        self._sleep = sleep or self._stop.wait
+        self._thread: threading.Thread | None = None
+
+    def start(self) -> None:
+        if self._thread is not None:
+            return
+        self._thread = threading.Thread(target=self._run, daemon=True)
+        self._thread.start()
+
+    def stop(self) -> None:
+        self._stop.set()
+        if self._thread is not None:
+            self._thread.join(timeout=1)
+
+    def run_once(self) -> None:
+        if self._stop.is_set():
+            return
+        self.refresh()
+        self._sleep(self.interval)
+
+    def _run(self) -> None:
+        while not self._stop.is_set():
+            self.run_once()
 
 
 if __name__ == "__main__":

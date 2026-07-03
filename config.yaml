@@ -13,9 +13,10 @@ jobs:
     label: Homebrew upgrade
     phase: core
     command: ["brew", "upgrade", "--greedy", "--force"]
-    required_commands: ["brew"]
+    required_commands: ["brew", "sudo"]
     optional: false
     log_name: brew-upgrade.log
+    sudo_preflight: true
 
   - name: brew-cleanup
     label: Homebrew cleanup
@@ -61,9 +62,10 @@ jobs:
     label: Mac App Store
     phase: parallel
     command: ["mas", "upgrade"]
-    required_commands: ["mas"]
+    required_commands: ["mas", "sudo"]
     optional: true
     log_name: mas.log
+    sudo_preflight: true
 
   - name: npm
     label: npm globals
@@ -76,11 +78,10 @@ jobs:
   - name: pnpm
     label: pnpm globals
     phase: parallel
-    command: ["sudo", "-n", "pnpm", "update", "--global"]
-    required_commands: ["sudo", "pnpm"]
+    command: ["pnpm", "update", "--global"]
+    required_commands: ["pnpm"]
     optional: true
     log_name: pnpm.log
-    sudo_preflight: true
 
   - name: rustup
     label: Rust toolchain
@@ -101,7 +102,8 @@ jobs:
   - name: skills
     label: Agent skills
     phase: parallel
-    command: ["$SUP_SKILLS_UPDATE"]
-    required_env: ["SUP_SKILLS_UPDATE"]
+    command: ["python3", "$HOME/.agents/skills/update.py"]
+    required_commands: ["python3"]
+    required_paths: ["$HOME/.agents/skills/update.py"]
     optional: true
     log_name: skills.log
