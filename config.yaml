@@ -1,6 +1,8 @@
 aliases:
   brew:
+    - brew-link-node-tools
     - brew-upgrade
+    - brew-relink-node-tools
     - brew-cleanup
   zimfw:
     - zimfw-upgrade
@@ -9,6 +11,17 @@ aliases:
     - cargo-install-update
 
 jobs:
+  - name: brew-link-node-tools
+    label: Homebrew node tool links
+    phase: core
+    command:
+      - sh
+      - -c
+      - for formula in pnpm node; do if brew list --formula "$formula" >/dev/null 2>&1; then brew link --overwrite "$formula"; fi; done
+    required_commands: ["brew", "sh"]
+    optional: true
+    log_name: brew-link-node-tools.log
+
   - name: brew-upgrade
     label: Homebrew upgrade
     phase: core
@@ -17,6 +30,17 @@ jobs:
     optional: false
     log_name: brew-upgrade.log
     sudo_preflight: true
+
+  - name: brew-relink-node-tools
+    label: Homebrew node tool relinks
+    phase: core
+    command:
+      - sh
+      - -c
+      - for formula in pnpm node; do if brew list --formula "$formula" >/dev/null 2>&1; then brew link --overwrite "$formula"; fi; done
+    required_commands: ["brew", "sh"]
+    optional: true
+    log_name: brew-relink-node-tools.log
 
   - name: brew-cleanup
     label: Homebrew cleanup

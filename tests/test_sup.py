@@ -65,7 +65,13 @@ class SelectionTest(unittest.TestCase):
 
         self.assertEqual(
             [job.name for job in jobs if job.phase == "core"],
-            ["brew-upgrade", "brew-cleanup", "zimfw-upgrade"],
+            [
+                "brew-link-node-tools",
+                "brew-upgrade",
+                "brew-relink-node-tools",
+                "brew-cleanup",
+                "zimfw-upgrade",
+            ],
         )
         self.assertEqual(
             [job.name for job in jobs if job.phase == "parallel"],
@@ -81,6 +87,23 @@ class SelectionTest(unittest.TestCase):
                 "skills",
             ],
         )
+
+    def test_brew_node_tool_links_are_repaired_around_upgrade(self):
+        jobs_config = load_jobs_config(config_path())
+        jobs = {job.name: job for job in jobs_config.jobs}
+        expected_command = (
+            "sh",
+            "-c",
+            'for formula in pnpm node; do if brew list --formula "$formula" '
+            '>/dev/null 2>&1; then brew link --overwrite "$formula"; fi; done',
+        )
+
+        for name in ("brew-link-node-tools", "brew-relink-node-tools"):
+            with self.subTest(name=name):
+                job = jobs[name]
+                self.assertEqual(job.command, expected_command)
+                self.assertEqual(job.required_commands, ("brew", "sh"))
+                self.assertTrue(job.optional)
 
     def test_brew_upgrade_preflights_sudo_for_cask_scripts(self):
         jobs_config = load_jobs_config(config_path())
