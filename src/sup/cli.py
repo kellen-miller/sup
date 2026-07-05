@@ -172,7 +172,7 @@ def authenticate_sudo_with_overlay(
     for _ in range(max_attempts):
         dashboard.show_auth_overlay(jobs, error=error)
         password = password_reader()
-        if validator(password) and sudo_ticket_available():
+        if validator(password):
             dashboard.clear_auth_overlay()
             return True
         error = "Authentication failed. Try again."
