@@ -426,7 +426,7 @@ class RunnerTest(unittest.TestCase):
             home=Path("/tmp/example-home"),
             command_exists=lambda name: True,
             path_exists=lambda path: True,
-            sudo_preflight=lambda: False,
+            sudo_preflight=lambda job: False,
             command_runner=lambda job: (
                 calls.append(job.name) or CommandResult(exit_code=0)
             ),
@@ -438,6 +438,24 @@ class RunnerTest(unittest.TestCase):
         self.assertEqual(results[0].status, "skipped")
         self.assertIn("sudo authentication", results[0].reason)
         self.assertEqual(Runner.exit_code_for(results), 0)
+
+    def test_sudo_preflight_receives_current_job(self):
+        preflight_jobs = []
+        jobs = [
+            job for job in load_jobs_config(config_path()).jobs if job.name == "mas"
+        ]
+        runner = Runner(
+            home=Path("/tmp/example-home"),
+            command_exists=lambda name: True,
+            path_exists=lambda path: True,
+            sudo_preflight=lambda job: preflight_jobs.append(job.name) or True,
+            command_runner=lambda job: CommandResult(exit_code=0),
+        )
+
+        results = runner.run(jobs, dry_run=False)
+
+        self.assertEqual(results[0].status, "succeeded")
+        self.assertEqual(preflight_jobs, ["mas"])
 
     def test_sudo_preflight_uses_sup_password_prompt(self):
         runner = Runner(home=Path("/tmp/example-home"))
@@ -791,7 +809,7 @@ class CliTest(unittest.TestCase):
             ],
         )
 
-    def test_main_reuses_prompting_sudo_callback_during_run(self):
+    def test_main_uses_current_job_for_sudo_prompting(self):
         out = io.StringIO()
         with (
             patch("sup.cli.Runner") as runner_class,
@@ -803,17 +821,22 @@ class CliTest(unittest.TestCase):
             authenticator.authenticate.side_effect = [True, True, True]
             runner_class.exit_code_for.return_value = 0
 
-            def run_jobs(_jobs, *, on_update):
-                self.assertTrue(runner.sudo_preflight())
-                self.assertTrue(runner.sudo_preflight())
+            def run_jobs(jobs, *, on_update):
+                sudo_jobs = {job.name: job for job in jobs if job.sudo_preflight}
+                self.assertTrue(runner.sudo_preflight(sudo_jobs["brew-upgrade"]))
+                self.assertTrue(runner.sudo_preflight(sudo_jobs["mas"]))
                 return []
 
             runner.run.side_effect = run_jobs
 
-            code = main(["--only", "pnpm"])
+            code = main(["--only", "brew-upgrade", "--only", "mas"])
 
         self.assertEqual(code, 0)
-        self.assertEqual(authenticator.authenticate.call_count, 3)
+        self.assertEqual(authenticator.authenticate.call_count, 2)
+        self.assertEqual(
+            [call.args[0].name for call in authenticator.authenticate.call_args_list],
+            ["brew-upgrade", "mas"],
+        )
 
     def test_keyboard_interrupt_stops_runner_and_returns_130(self):
         out = io.StringIO()
