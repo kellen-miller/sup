@@ -113,6 +113,38 @@ class SelectionTest(unittest.TestCase):
         self.assertTrue(brew_upgrade.sudo_preflight)
         self.assertIn("sudo", brew_upgrade.required_commands)
 
+    def test_zimfw_jobs_source_zim_init_with_zsh(self):
+        home = Path("/tmp/example-home")
+        jobs_config = load_jobs_config(config_path(), home=home)
+        jobs = {job.name: job for job in jobs_config.jobs}
+
+        self.assertEqual(
+            jobs["zimfw-upgrade"].command,
+            (
+                "zsh",
+                "-lc",
+                f'source "{home}/.zim/init.zsh"; zimfw upgrade',
+            ),
+        )
+        self.assertEqual(jobs["zimfw-upgrade"].required_commands, ("zsh",))
+        self.assertEqual(
+            jobs["zimfw-upgrade"].required_paths,
+            (home / ".zim" / "init.zsh",),
+        )
+        self.assertEqual(
+            jobs["zimfw-update"].command,
+            (
+                "zsh",
+                "-lc",
+                f'source "{home}/.zim/init.zsh"; zimfw update',
+            ),
+        )
+        self.assertEqual(jobs["zimfw-update"].required_commands, ("zsh",))
+        self.assertEqual(
+            jobs["zimfw-update"].required_paths,
+            (home / ".zim" / "init.zsh",),
+        )
+
     def test_mas_preflights_sudo_for_update_subprocesses(self):
         jobs_config = load_jobs_config(config_path())
         mas = next(job for job in jobs_config.jobs if job.name == "mas")
