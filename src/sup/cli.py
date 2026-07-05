@@ -192,7 +192,7 @@ def authenticate_sudo_with_overlay(
 def has_sudo_ticket() -> bool:
     try:
         result = subprocess.run(
-            ["sudo", "-n", "true"],
+            ["sudo", "-n", "-v"],
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
             check=False,
