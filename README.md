@@ -62,7 +62,7 @@ Supported job keys:
   `false`.
 - `log_name`: filename under the current run log directory.
 - `sudo_preflight`: authenticate sudo through the dashboard overlay before
-  executing the job and keep the ticket alive while selected jobs run.
+  executing the job.
 
 `$HOME`, `$VAR`, and `${VAR}` placeholders in `command` and `required_paths`
 are expanded when the config is loaded. Missing required environment variables

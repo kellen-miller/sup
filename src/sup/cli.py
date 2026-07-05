@@ -18,7 +18,6 @@ from .runner import Runner
 PasswordReader = Callable[[], str]
 SudoValidator = Callable[[str], bool]
 SudoTicketCheck = Callable[[], bool]
-Sleeper = Callable[[float], object]
 INTERRUPTED_EXIT_CODE = 130
 
 
@@ -100,14 +99,7 @@ def main(argv: list[str] | None = None) -> int:
             runner.sudo_preflight = (
                 authenticator.authenticate if sudo_ok else lambda: False
             )
-            keepalive = SudoTicketKeepalive() if sudo_jobs and sudo_ok else None
-            if keepalive is not None:
-                keepalive.start()
-            try:
-                results = runner.run(selected, on_update=dashboard.update)
-            finally:
-                if keepalive is not None:
-                    keepalive.stop()
+            results = runner.run(selected, on_update=dashboard.update)
     except KeyboardInterrupt:
         runner.stop()
         console.print("\n[bold yellow]Run interrupted; stopping active jobs.[/]")
@@ -215,42 +207,6 @@ def validate_sudo_password(password: str) -> bool:
     except FileNotFoundError:
         return False
     return result.returncode == 0
-
-
-class SudoTicketKeepalive:
-    def __init__(
-        self,
-        *,
-        refresh: SudoTicketCheck | None = None,
-        sleep: Sleeper | None = None,
-        interval: float = 60,
-    ) -> None:
-        self.refresh = refresh or has_sudo_ticket
-        self.interval = interval
-        self._stop = threading.Event()
-        self._sleep = sleep or self._stop.wait
-        self._thread: threading.Thread | None = None
-
-    def start(self) -> None:
-        if self._thread is not None:
-            return
-        self._thread = threading.Thread(target=self._run, daemon=True)
-        self._thread.start()
-
-    def stop(self) -> None:
-        self._stop.set()
-        if self._thread is not None:
-            self._thread.join(timeout=1)
-
-    def run_once(self) -> None:
-        if self._stop.is_set():
-            return
-        self.refresh()
-        self._sleep(self.interval)
-
-    def _run(self) -> None:
-        while not self._stop.is_set():
-            self.run_once()
 
 
 if __name__ == "__main__":

@@ -15,7 +15,6 @@ from rich.console import Console
 from sup.cli import (
     INTERRUPTED_EXIT_CODE,
     SudoAuthenticator,
-    SudoTicketKeepalive,
     authenticate_sudo_with_overlay,
     has_sudo_ticket,
     raise_keyboard_interrupt,
@@ -674,21 +673,6 @@ class CliTest(unittest.TestCase):
             check=False,
         )
 
-    def test_sudo_keepalive_refreshes_ticket_until_stopped(self):
-        refreshes = []
-        sleeps = []
-        keepalive = SudoTicketKeepalive(
-            refresh=lambda: refreshes.append("refresh") or True,
-            sleep=lambda seconds: sleeps.append(seconds),
-            interval=30,
-        )
-
-        keepalive.run_once()
-        keepalive.stop()
-
-        self.assertEqual(refreshes, ["refresh"])
-        self.assertEqual(sleeps, [30])
-
     def test_sudo_authenticator_prompts_again_after_ticket_expires(self):
         events = []
         job = Job(
@@ -738,7 +722,6 @@ class CliTest(unittest.TestCase):
         with (
             patch("sup.cli.Runner") as runner_class,
             patch("sup.cli.SudoAuthenticator") as authenticator_class,
-            patch("sup.cli.SudoTicketKeepalive"),
             redirect_stdout(out),
         ):
             runner = runner_class.return_value
@@ -763,7 +746,6 @@ class CliTest(unittest.TestCase):
 
         with (
             patch("sup.cli.Runner") as runner_class,
-            patch("sup.cli.SudoTicketKeepalive"),
             redirect_stdout(out),
         ):
             runner = runner_class.return_value
