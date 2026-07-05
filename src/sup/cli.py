@@ -95,10 +95,8 @@ def main(argv: list[str] | None = None) -> int:
         with LiveDashboard(selected, console=console) as dashboard:
             sudo_jobs = [job for job in selected if job.sudo_preflight]
             authenticator = SudoAuthenticator(sudo_jobs, dashboard=dashboard)
-            sudo_ok = authenticator.authenticate()
-            runner.sudo_preflight = (
-                authenticator.authenticate if sudo_ok else lambda: False
-            )
+            if sudo_jobs:
+                runner.sudo_preflight = authenticator.authenticate
             results = runner.run(selected, on_update=dashboard.update)
     except KeyboardInterrupt:
         runner.stop()
@@ -133,12 +131,13 @@ class SudoAuthenticator:
         self.max_attempts = max_attempts
         self._lock = threading.Lock()
 
-    def authenticate(self) -> bool:
+    def authenticate(self, job: Job | None = None) -> bool:
         if not self.jobs:
             return True
+        jobs = (job,) if job is not None else self.jobs
         with self._lock:
             return authenticate_sudo_with_overlay(
-                self.jobs,
+                jobs,
                 dashboard=self.dashboard,
                 sudo_ticket_available=self.sudo_ticket_available,
                 password_reader=self.password_reader,

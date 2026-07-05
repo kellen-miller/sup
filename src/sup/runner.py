@@ -33,6 +33,7 @@ CommandRunner = Callable[[Job], CommandResult]
 CommandExists = Callable[[str], bool]
 PathExists = Callable[[Path], bool]
 StatusCallback = Callable[..., None]
+SudoPreflight = Callable[[Job], bool]
 STOP_TIMEOUT_SECONDS = 1.0
 
 
@@ -44,7 +45,7 @@ class Runner:
         command_runner: CommandRunner | None = None,
         command_exists: CommandExists | None = None,
         path_exists: PathExists | None = None,
-        sudo_preflight: Callable[[], bool] | None = None,
+        sudo_preflight: SudoPreflight | None = None,
         retention_days: int = 30,
         log_cleanup: bool = True,
         env: Mapping[str, str] | None = None,
@@ -170,7 +171,7 @@ class Runner:
             self._emit(on_update, job.name, status, result)
             return result
 
-        if job.sudo_preflight and not self.sudo_preflight():
+        if job.sudo_preflight and not self.sudo_preflight(job):
             reason = "sudo authentication unavailable"
             log_path.write_text(reason + "\n", encoding="utf-8")
             status = "skipped" if job.optional else "failed"
@@ -252,7 +253,7 @@ class Runner:
                 finally:
                     self._untrack_process(process)
 
-    def _sudo_preflight(self) -> bool:
+    def _sudo_preflight(self, _job: Job | None = None) -> bool:
         return (
             subprocess.run(
                 ["sudo", "-p", "sup sudo password: ", "-v"],
