@@ -1,4 +1,5 @@
 import io
+import re
 import signal
 import subprocess
 import sys
@@ -14,7 +15,6 @@ from rich.console import Console
 from sup.cli import (
     INTERRUPTED_EXIT_CODE,
     SudoAuthenticator,
-    SudoTicketKeepalive,
     authenticate_sudo_with_overlay,
     has_sudo_ticket,
     raise_keyboard_interrupt,
@@ -34,11 +34,27 @@ from sup.logs import cleanup_old_runs, create_run_dir, tail_lines
 from sup.runner import CommandResult, JobResult, Runner
 
 
+ANSI_STYLE = re.compile(r"\x1b\[[0-9;]*m")
+
+
 def find_line_index(lines: list[str], needle: str) -> int:
     for index, line in enumerate(lines):
         if needle in line:
             return index
     raise AssertionError(f"{needle!r} not found")
+
+
+def strip_ansi_styles(value: str) -> str:
+    return ANSI_STYLE.sub("", value)
+
+
+def terminal_console(*, width: int = 120) -> Console:
+    return Console(
+        file=io.StringIO(),
+        force_terminal=True,
+        width=width,
+        _environ={},
+    )
 
 
 class SelectionTest(unittest.TestCase):
@@ -48,7 +64,13 @@ class SelectionTest(unittest.TestCase):
 
         self.assertEqual(
             [job.name for job in jobs if job.phase == "core"],
-            ["brew-upgrade", "brew-cleanup", "zimfw-upgrade"],
+            [
+                "brew-link-node-tools",
+                "brew-upgrade",
+                "brew-relink-node-tools",
+                "brew-cleanup",
+                "zimfw-upgrade",
+            ],
         )
         self.assertEqual(
             [job.name for job in jobs if job.phase == "parallel"],
@@ -64,6 +86,23 @@ class SelectionTest(unittest.TestCase):
                 "skills",
             ],
         )
+
+    def test_brew_node_tool_links_are_repaired_around_upgrade(self):
+        jobs_config = load_jobs_config(config_path())
+        jobs = {job.name: job for job in jobs_config.jobs}
+        expected_command = (
+            "sh",
+            "-c",
+            'for formula in pnpm node; do if brew list --formula "$formula" '
+            '>/dev/null 2>&1; then brew link --overwrite "$formula"; fi; done',
+        )
+
+        for name in ("brew-link-node-tools", "brew-relink-node-tools"):
+            with self.subTest(name=name):
+                job = jobs[name]
+                self.assertEqual(job.command, expected_command)
+                self.assertEqual(job.required_commands, ("brew", "sh"))
+                self.assertTrue(job.optional)
 
     def test_brew_upgrade_preflights_sudo_for_cask_scripts(self):
         jobs_config = load_jobs_config(config_path())
@@ -621,33 +660,18 @@ class CliTest(unittest.TestCase):
             check=False,
         )
 
-    def test_has_sudo_ticket_checks_real_noninteractive_command(self):
+    def test_has_sudo_ticket_refreshes_real_noninteractive_ticket(self):
         with patch("sup.cli.subprocess.run") as run:
             run.return_value.returncode = 0
 
             self.assertTrue(has_sudo_ticket())
 
         run.assert_called_once_with(
-            ["sudo", "-n", "true"],
+            ["sudo", "-n", "-v"],
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
             check=False,
         )
-
-    def test_sudo_keepalive_refreshes_ticket_until_stopped(self):
-        refreshes = []
-        sleeps = []
-        keepalive = SudoTicketKeepalive(
-            refresh=lambda: refreshes.append("refresh") or True,
-            sleep=lambda seconds: sleeps.append(seconds),
-            interval=30,
-        )
-
-        keepalive.run_once()
-        keepalive.stop()
-
-        self.assertEqual(refreshes, ["refresh"])
-        self.assertEqual(sleeps, [30])
 
     def test_sudo_authenticator_prompts_again_after_ticket_expires(self):
         events = []
@@ -698,7 +722,6 @@ class CliTest(unittest.TestCase):
         with (
             patch("sup.cli.Runner") as runner_class,
             patch("sup.cli.SudoAuthenticator") as authenticator_class,
-            patch("sup.cli.SudoTicketKeepalive"),
             redirect_stdout(out),
         ):
             runner = runner_class.return_value
@@ -723,7 +746,6 @@ class CliTest(unittest.TestCase):
 
         with (
             patch("sup.cli.Runner") as runner_class,
-            patch("sup.cli.SudoTicketKeepalive"),
             redirect_stdout(out),
         ):
             runner = runner_class.return_value
@@ -748,18 +770,13 @@ class DisplayTest(unittest.TestCase):
         *,
         width: int = 160,
     ) -> list[str]:
-        console = Console(
-            file=io.StringIO(),
-            force_terminal=True,
-            width=width,
-            color_system=None,
-        )
+        console = terminal_console(width=width)
         console.print(dashboard.render())
         return console.file.getvalue().splitlines()
 
     def test_dry_run_renders_mission_control_theme(self):
         jobs = load_jobs_config(config_path()).jobs[:2]
-        console = Console(file=io.StringIO(), force_terminal=True, width=120)
+        console = terminal_console(width=120)
 
         render_dry_run(jobs, console=console)
         output = console.file.getvalue()
@@ -774,7 +791,7 @@ class DisplayTest(unittest.TestCase):
         jobs = [
             job for job in load_jobs_config(config_path()).jobs if job.name == "rustup"
         ]
-        console = Console(file=io.StringIO(), force_terminal=True, width=120)
+        console = terminal_console(width=120)
         dashboard = LiveDashboard(jobs, console=console)
 
         dashboard.update("rustup", "running", output="older preface")
@@ -822,7 +839,7 @@ class DisplayTest(unittest.TestCase):
                 log_name="example.log",
             )
         ]
-        console = Console(file=io.StringIO(), force_terminal=True, width=120)
+        console = terminal_console(width=120)
         dashboard = LiveDashboard(jobs, console=console)
 
         renderable = dashboard.render()
@@ -845,7 +862,7 @@ class DisplayTest(unittest.TestCase):
                 sudo_preflight=True,
             )
         ]
-        console = Console(file=io.StringIO(), force_terminal=True, width=120)
+        console = terminal_console(width=120)
         dashboard = LiveDashboard(jobs, console=console)
 
         dashboard.show_auth_overlay(jobs)
@@ -856,17 +873,17 @@ class DisplayTest(unittest.TestCase):
         self.assertIn("brew-upgrade", output)
         self.assertIn("Password", output)
         self.assertIn("hidden input active", output)
-        self.assertIn("\x1b[2m", output)
+        self.assertRegex(output, r"\x1b\[[0-9;]*2[0-9;]*m")
 
     def test_sudo_auth_overlay_does_not_reflow_dashboard(self):
         jobs = load_jobs_config(config_path()).jobs
         base_dashboard = LiveDashboard(
             jobs,
-            console=Console(file=io.StringIO(), force_terminal=True, width=160),
+            console=terminal_console(width=160),
         )
         overlay_dashboard = LiveDashboard(
             jobs,
-            console=Console(file=io.StringIO(), force_terminal=True, width=160),
+            console=terminal_console(width=160),
         )
         overlay_dashboard.show_auth_overlay([job for job in jobs if job.sudo_preflight])
 
@@ -875,16 +892,18 @@ class DisplayTest(unittest.TestCase):
 
         self.assertEqual(len(overlay_lines), len(base_lines))
         self.assertEqual(
-            find_line_index(base_lines, "brew-upgrade"),
-            find_line_index(overlay_lines, "brew-upgrade"),
+            find_line_index(base_lines, "npm"),
+            find_line_index(overlay_lines, "npm"),
         )
         self.assertEqual(
             find_line_index(base_lines, "skills"),
             find_line_index(overlay_lines, "skills"),
         )
-        prompt_line = overlay_lines[
-            find_line_index(overlay_lines, "sudo authentication required")
-        ]
+        prompt_line = strip_ansi_styles(
+            overlay_lines[
+                find_line_index(overlay_lines, "sudo authentication required")
+            ]
+        )
         prompt_start = prompt_line.index("sudo authentication required")
         self.assertGreater(prompt_start, 45)
         self.assertLess(prompt_start, 90)
@@ -901,7 +920,7 @@ class DisplayTest(unittest.TestCase):
                 log_name="example.log",
             )
         ]
-        console = Console(file=io.StringIO(), force_terminal=True, width=120)
+        console = terminal_console(width=120)
         dashboard = LiveDashboard(jobs, console=console)
 
         with patch("sup.display.Live") as live:
@@ -923,7 +942,7 @@ class DisplayTest(unittest.TestCase):
                 log_name="example.log",
             )
         ]
-        console = Console(file=io.StringIO(), force_terminal=True, width=120)
+        console = terminal_console(width=120)
         now = 0.0
         dashboard = LiveDashboard(jobs, console=console, clock=lambda: now)
 
@@ -968,7 +987,7 @@ class DisplayTest(unittest.TestCase):
             elapsed=1.25,
             reason="",
         )
-        console = Console(file=io.StringIO(), force_terminal=True, width=120)
+        console = terminal_console(width=120)
 
         render_summary([result], console=console, tail_count=40)
         output = console.file.getvalue()
