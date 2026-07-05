@@ -9,6 +9,7 @@ from rich import box
 from rich.console import Console, ConsoleOptions, Group
 from rich.live import Live
 from rich.panel import Panel
+from rich.rule import Rule
 from rich.segment import Segment
 from rich.table import Table
 from rich.text import Text
@@ -57,6 +58,19 @@ PHASE_TAG = {
     "parallel": "[par]",
 }
 
+PHASE_LABEL = {
+    "core": "core phase",
+    "parallel": "parallel phase",
+}
+
+STATUS_SORT = {
+    "running": 0,
+    "queued": 1,
+    "failed": 2,
+    "skipped": 2,
+    "succeeded": 2,
+}
+
 
 def render_dry_run(jobs: list[Job], *, console: Console) -> None:
     statuses = {job.name: "queued" for job in jobs}
@@ -71,7 +85,7 @@ def render_dry_run(jobs: list[Job], *, console: Console) -> None:
                     ),
                 ),
                 mission_meter(statuses.values()),
-                jobs_table(jobs, statuses),
+                jobs_view(jobs, statuses),
             ),
             title="SUP MISSION CONTROL",
             border_style=TOKYONIGHT["blue"],
@@ -103,7 +117,12 @@ class LiveDashboard:
         self._auth_overlay_error: str | None = None
 
     def __enter__(self) -> "LiveDashboard":
-        self._live = Live(self, console=self.console, auto_refresh=False)
+        self._live = Live(
+            self,
+            console=self.console,
+            auto_refresh=False,
+            vertical_overflow="visible",
+        )
         self._live.__enter__()
         return self
 
@@ -181,7 +200,7 @@ class LiveDashboard:
         items = [
             dashboard_status_text(subtitle, dimmed=has_auth_overlay),
             mission_meter(self.statuses.values(), dimmed=has_auth_overlay),
-            jobs_table(
+            jobs_view(
                 self.jobs,
                 self.statuses,
                 elapsed=self.elapsed,
@@ -372,6 +391,50 @@ def dashboard_status_text(subtitle: str, *, dimmed: bool = False) -> Text:
     return Text(subtitle, style=theme_style(TOKYONIGHT["fg"], dimmed=dimmed))
 
 
+def jobs_view(
+    jobs: list[Job],
+    statuses: dict[str, str],
+    *,
+    elapsed: dict[str, str] | None = None,
+    exit_codes: dict[str, str] | None = None,
+    output_lines: dict[str, deque[str]] | None = None,
+    frame: int = 0,
+    dimmed: bool = False,
+) -> Group:
+    sections = []
+    for phase in job_phases(jobs):
+        phase_jobs = [job for job in jobs if job.phase == phase]
+        sections.append(phase_heading(phase, dimmed=dimmed))
+        sections.append(
+            jobs_table(
+                phase_jobs,
+                statuses,
+                elapsed=elapsed,
+                exit_codes=exit_codes,
+                output_lines=output_lines,
+                frame=frame,
+                dimmed=dimmed,
+            )
+        )
+    return Group(*sections)
+
+
+def job_phases(jobs: list[Job]) -> list[str]:
+    phases: list[str] = []
+    for job in jobs:
+        if job.phase not in phases:
+            phases.append(job.phase)
+    return phases
+
+
+def phase_heading(phase: str, *, dimmed: bool = False) -> Rule:
+    label = PHASE_LABEL.get(phase, phase)
+    return Rule(
+        Text(label, style=theme_style(TOKYONIGHT["purple"], bold=True, dimmed=dimmed)),
+        style=theme_style(TOKYONIGHT["muted"], dimmed=dimmed),
+    )
+
+
 def jobs_table(
     jobs: list[Job],
     statuses: dict[str, str],
@@ -394,13 +457,19 @@ def jobs_table(
     )
     table.add_column("signal", no_wrap=True)
     table.add_column("stage", width=6, no_wrap=True)
-    table.add_column("job / command", ratio=1, min_width=27, overflow="fold")
+    table.add_column(
+        "job / command",
+        ratio=1,
+        min_width=27,
+        overflow="ellipsis",
+        no_wrap=True,
+    )
     table.add_column("trajectory", width=12, no_wrap=True)
     table.add_column("recent output", ratio=2, min_width=24, overflow="fold")
     table.add_column("time", justify="right", no_wrap=True)
     table.add_column("exit", justify="right", no_wrap=True)
 
-    for job in jobs:
+    for job in sorted_jobs(jobs, statuses):
         status = statuses.get(job.name, "queued")
         table.add_row(
             status_label(status, dimmed=dimmed),
@@ -418,6 +487,17 @@ def jobs_table(
             ),
         )
     return table
+
+
+def sorted_jobs(jobs: list[Job], statuses: dict[str, str]) -> list[Job]:
+    job_index = {job.name: index for index, job in enumerate(jobs)}
+    return sorted(
+        jobs,
+        key=lambda job: (
+            STATUS_SORT.get(statuses.get(job.name, "queued"), 1),
+            job_index[job.name],
+        ),
+    )
 
 
 def summary_table(grouped: dict[str, list[JobResult]]) -> Table:

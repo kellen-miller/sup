@@ -53,16 +53,18 @@ jobs:
   - name: zimfw-upgrade
     label: Zim upgrade
     phase: core
-    command: ["zimfw", "upgrade"]
-    required_commands: ["zimfw"]
+    command: ["zsh", "-lc", "source \"$HOME/.zim/init.zsh\"; zimfw upgrade"]
+    required_commands: ["zsh"]
+    required_paths: ["$HOME/.zim/init.zsh"]
     optional: true
     log_name: zimfw-upgrade.log
 
   - name: zimfw-update
     label: Zim update
     phase: parallel
-    command: ["zimfw", "update"]
-    required_commands: ["zimfw"]
+    command: ["zsh", "-lc", "source \"$HOME/.zim/init.zsh\"; zimfw update"]
+    required_commands: ["zsh"]
+    required_paths: ["$HOME/.zim/init.zsh"]
     optional: true
     log_name: zimfw-update.log
 

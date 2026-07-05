@@ -113,6 +113,38 @@ class SelectionTest(unittest.TestCase):
         self.assertTrue(brew_upgrade.sudo_preflight)
         self.assertIn("sudo", brew_upgrade.required_commands)
 
+    def test_zimfw_jobs_source_zim_init_with_zsh(self):
+        home = Path("/tmp/example-home")
+        jobs_config = load_jobs_config(config_path(), home=home)
+        jobs = {job.name: job for job in jobs_config.jobs}
+
+        self.assertEqual(
+            jobs["zimfw-upgrade"].command,
+            (
+                "zsh",
+                "-lc",
+                f'source "{home}/.zim/init.zsh"; zimfw upgrade',
+            ),
+        )
+        self.assertEqual(jobs["zimfw-upgrade"].required_commands, ("zsh",))
+        self.assertEqual(
+            jobs["zimfw-upgrade"].required_paths,
+            (home / ".zim" / "init.zsh",),
+        )
+        self.assertEqual(
+            jobs["zimfw-update"].command,
+            (
+                "zsh",
+                "-lc",
+                f'source "{home}/.zim/init.zsh"; zimfw update',
+            ),
+        )
+        self.assertEqual(jobs["zimfw-update"].required_commands, ("zsh",))
+        self.assertEqual(
+            jobs["zimfw-update"].required_paths,
+            (home / ".zim" / "init.zsh",),
+        )
+
     def test_mas_preflights_sudo_for_update_subprocesses(self):
         jobs_config = load_jobs_config(config_path())
         mas = next(job for job in jobs_config.jobs if job.name == "mas")
@@ -612,7 +644,7 @@ class CliTest(unittest.TestCase):
             ],
         )
 
-    def test_sudo_overlay_confirms_ticket_after_validation(self):
+    def test_sudo_overlay_trusts_successful_validation(self):
         job = Job(
             name="pnpm",
             label="pnpm globals",
@@ -623,7 +655,7 @@ class CliTest(unittest.TestCase):
             log_name="pnpm.log",
             sudo_preflight=True,
         )
-        ticket_checks = iter([False, False])
+        ticket_checks = iter([False])
 
         class FakeDashboard:
             console = Console(file=io.StringIO())
@@ -643,7 +675,7 @@ class CliTest(unittest.TestCase):
             max_attempts=1,
         )
 
-        self.assertFalse(ok)
+        self.assertTrue(ok)
 
     def test_validate_sudo_password_uses_stdin_promptless_sudo(self):
         with patch("sup.cli.subprocess.run") as run:
@@ -673,6 +705,48 @@ class CliTest(unittest.TestCase):
             check=False,
         )
 
+    def test_sudo_authenticator_reuses_valid_ticket_without_prompt(self):
+        events = []
+        job = Job(
+            name="pnpm",
+            label="pnpm globals",
+            phase="parallel",
+            command=("sudo", "-n", "pnpm", "update", "--global"),
+            required_commands=("sudo", "pnpm"),
+            optional=True,
+            log_name="pnpm.log",
+            sudo_preflight=True,
+        )
+
+        class FakeDashboard:
+            console = Console(file=io.StringIO())
+
+            def show_auth_overlay(self, jobs, *, error=None):
+                events.append(("show", tuple(job.name for job in jobs), error))
+
+            def clear_auth_overlay(self):
+                events.append(("clear",))
+
+        ticket_checks = iter([False, True])
+        passwords = iter(["first"])
+        authenticator = SudoAuthenticator(
+            [job],
+            dashboard=FakeDashboard(),
+            sudo_ticket_available=lambda: next(ticket_checks),
+            password_reader=lambda: next(passwords),
+            validator=lambda password: password in {"first", "second"},
+        )
+
+        self.assertTrue(authenticator.authenticate())
+        self.assertTrue(authenticator.authenticate())
+        self.assertEqual(
+            events,
+            [
+                ("show", ("pnpm",), None),
+                ("clear",),
+            ],
+        )
+
     def test_sudo_authenticator_prompts_again_after_ticket_expires(self):
         events = []
         job = Job(
@@ -695,7 +769,7 @@ class CliTest(unittest.TestCase):
             def clear_auth_overlay(self):
                 events.append(("clear",))
 
-        ticket_checks = iter([False, True, False, True])
+        ticket_checks = iter([False, False])
         passwords = iter(["first", "second"])
         authenticator = SudoAuthenticator(
             [job],
@@ -813,6 +887,46 @@ class DisplayTest(unittest.TestCase):
         self.assertNotIn("TOKYONIGHT MISSION CONTROL", output)
         self.assertNotIn("SUP ORBITAL COMMAND", output)
 
+    def test_live_dashboard_sorts_active_jobs_first_within_phase(self):
+        jobs = [
+            job
+            for job in load_jobs_config(config_path()).jobs
+            if job.name in {"gup", "pnpm", "rustup"}
+        ]
+        console = terminal_console(width=160)
+        dashboard = LiveDashboard(jobs, console=console)
+
+        dashboard.update("pnpm", "succeeded")
+        dashboard.update("rustup", "running")
+        console.print(dashboard.render())
+        lines = [
+            strip_ansi_styles(line) for line in console.file.getvalue().splitlines()
+        ]
+
+        self.assertLess(
+            find_line_index(lines, "rustup"),
+            find_line_index(lines, "gup"),
+        )
+        self.assertLess(
+            find_line_index(lines, "gup"),
+            find_line_index(lines, "pnpm"),
+        )
+
+    def test_live_dashboard_renders_phase_sections(self):
+        jobs = [
+            job
+            for job in load_jobs_config(config_path()).jobs
+            if job.name in {"brew-upgrade", "gup"}
+        ]
+        console = terminal_console(width=160)
+        dashboard = LiveDashboard(jobs, console=console)
+
+        console.print(dashboard.render())
+        output = console.file.getvalue()
+
+        self.assertIn("core phase", output)
+        self.assertIn("parallel phase", output)
+
     def test_display_command_shortens_long_env_assignments(self):
         command = display_command(
             (
@@ -927,7 +1041,12 @@ class DisplayTest(unittest.TestCase):
             with dashboard:
                 dashboard.update("example", "running")
 
-        live.assert_called_once_with(dashboard, console=console, auto_refresh=False)
+        live.assert_called_once_with(
+            dashboard,
+            console=console,
+            auto_refresh=False,
+            vertical_overflow="visible",
+        )
         live.return_value.update.assert_called_once_with(dashboard, refresh=True)
 
     def test_live_dashboard_throttles_output_refreshes(self):
