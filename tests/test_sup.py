@@ -79,22 +79,21 @@ class SelectionTest(unittest.TestCase):
                 "gup",
                 "gcloud",
                 "mas",
-                "npm",
-                "pnpm",
+                "node-package-managers",
                 "rustup",
                 "cargo-install-update",
                 "skills",
             ],
         )
 
-    def test_brew_node_tool_links_are_repaired_around_upgrade(self):
+    def test_brew_node_link_is_repaired_around_upgrade(self):
         jobs_config = load_jobs_config(config_path())
         jobs = {job.name: job for job in jobs_config.jobs}
         expected_command = (
             "sh",
             "-c",
-            'for formula in pnpm node; do if brew list --formula "$formula" '
-            '>/dev/null 2>&1; then brew link --overwrite "$formula"; fi; done',
+            "if brew list --formula node >/dev/null 2>&1; then "
+            "brew link --overwrite node; fi",
         )
 
         for name in ("brew-link-node-tools", "brew-relink-node-tools"):
@@ -152,26 +151,25 @@ class SelectionTest(unittest.TestCase):
         self.assertTrue(mas.sudo_preflight)
         self.assertIn("sudo", mas.required_commands)
 
-    def test_pnpm_updates_globals_without_sudo(self):
-        home = Path("/tmp/example-home")
-        jobs_config = load_jobs_config(
-            config_path(),
-            home=home,
-            env={"PATH": "/opt/homebrew/bin:/usr/bin"},
-        )
-        pnpm = next(job for job in jobs_config.jobs if job.name == "pnpm")
+    def test_node_package_managers_update_in_order_without_sudo(self):
+        jobs_config = load_jobs_config(config_path())
+        jobs = {job.name: job for job in jobs_config.jobs}
+        self.assertIn("node-package-managers", jobs)
+        job = jobs["node-package-managers"]
 
         self.assertEqual(
-            pnpm.command,
+            job.command,
             (
-                "pnpm",
-                "update",
-                "--global",
+                "sh",
+                "-c",
+                "npm update --global && "
+                "corepack install --global pnpm@latest && "
+                "pnpm update --global",
             ),
         )
-        self.assertFalse(pnpm.sudo_preflight)
-        self.assertNotIn("sudo", pnpm.required_commands)
-        self.assertEqual(pnpm.required_paths, ())
+        self.assertEqual(job.required_commands, ("sh", "npm", "corepack", "pnpm"))
+        self.assertFalse(job.sudo_preflight)
+        self.assertNotIn("sudo", job.required_commands)
 
     def test_default_config_path_uses_config_yaml(self):
         self.assertEqual(config_path().name, "config.yaml")
@@ -193,6 +191,19 @@ class SelectionTest(unittest.TestCase):
         self.assertNotIn("brew-cleanup", names)
         self.assertNotIn("mas", names)
         self.assertIn("zimfw-upgrade", names)
+        self.assertIn("node-package-managers", names)
+
+        for selector in ("npm", "pnpm", "node-package-managers"):
+            with self.subTest(selector=selector):
+                selected = resolve_job_selection(
+                    jobs,
+                    aliases=jobs_config.aliases,
+                    only=[selector],
+                    skip=[],
+                )
+                self.assertEqual(
+                    [job.name for job in selected], ["node-package-managers"]
+                )
 
     def test_selection_rejects_unknown_selector(self):
         with self.assertRaisesRegex(ValueError, "unknown selector"):
@@ -914,12 +925,12 @@ class DisplayTest(unittest.TestCase):
         jobs = [
             job
             for job in load_jobs_config(config_path()).jobs
-            if job.name in {"gup", "pnpm", "rustup"}
+            if job.name in {"gup", "node-package-managers", "rustup"}
         ]
         console = terminal_console(width=160)
         dashboard = LiveDashboard(jobs, console=console)
 
-        dashboard.update("pnpm", "succeeded")
+        dashboard.update("node-package-managers", "succeeded")
         dashboard.update("rustup", "running")
         console.print(dashboard.render())
         lines = [
@@ -932,7 +943,7 @@ class DisplayTest(unittest.TestCase):
         )
         self.assertLess(
             find_line_index(lines, "gup"),
-            find_line_index(lines, "pnpm"),
+            find_line_index(lines, "node-package-managers"),
         )
 
     def test_live_dashboard_renders_phase_sections(self):

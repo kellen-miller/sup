@@ -9,6 +9,10 @@ aliases:
     - zimfw-update
   cargo:
     - cargo-install-update
+  npm:
+    - node-package-managers
+  pnpm:
+    - node-package-managers
 
 jobs:
   - name: brew-link-node-tools
@@ -17,7 +21,7 @@ jobs:
     command:
       - sh
       - -c
-      - for formula in pnpm node; do if brew list --formula "$formula" >/dev/null 2>&1; then brew link --overwrite "$formula"; fi; done
+      - if brew list --formula node >/dev/null 2>&1; then brew link --overwrite node; fi
     required_commands: ["brew", "sh"]
     optional: true
     log_name: brew-link-node-tools.log
@@ -37,7 +41,7 @@ jobs:
     command:
       - sh
       - -c
-      - for formula in pnpm node; do if brew list --formula "$formula" >/dev/null 2>&1; then brew link --overwrite "$formula"; fi; done
+      - if brew list --formula node >/dev/null 2>&1; then brew link --overwrite node; fi
     required_commands: ["brew", "sh"]
     optional: true
     log_name: brew-relink-node-tools.log
@@ -93,21 +97,16 @@ jobs:
     log_name: mas.log
     sudo_preflight: true
 
-  - name: npm
-    label: npm globals
+  - name: node-package-managers
+    label: Node package managers
     phase: parallel
-    command: ["npm", "update", "--global"]
-    required_commands: ["npm"]
+    command:
+      - sh
+      - -c
+      - npm update --global && corepack install --global pnpm@latest && pnpm update --global
+    required_commands: ["sh", "npm", "corepack", "pnpm"]
     optional: true
-    log_name: npm.log
-
-  - name: pnpm
-    label: pnpm globals
-    phase: parallel
-    command: ["pnpm", "update", "--global"]
-    required_commands: ["pnpm"]
-    optional: true
-    log_name: pnpm.log
+    log_name: node-package-managers.log
 
   - name: rustup
     label: Rust toolchain
