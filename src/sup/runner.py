@@ -33,7 +33,6 @@ class JobResult:
 class _PreparedJob:
     job: Job
     log_path: Path
-    started: float
 
 
 CommandRunner = Callable[[Job], CommandResult]
@@ -193,7 +192,7 @@ class Runner:
             self._emit(on_update, job.name, status, result)
             return result
 
-        return _PreparedJob(job=job, log_path=log_path, started=started)
+        return _PreparedJob(job=job, log_path=log_path)
 
     def _execute(
         self,
@@ -201,6 +200,7 @@ class Runner:
         on_update: StatusCallback | None = None,
     ) -> JobResult:
         job = prepared.job
+        started = time.monotonic()
         self._emit(on_update, job.name, "running", None)
         command_result = (
             self.command_runner(job)
@@ -212,7 +212,7 @@ class Runner:
             job,
             status,
             command_result.exit_code,
-            time.monotonic() - prepared.started,
+            time.monotonic() - started,
             prepared.log_path,
         )
         self._emit(on_update, job.name, status, result)

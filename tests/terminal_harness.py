@@ -269,7 +269,11 @@ def analyze(
         "final_marker_count": raw.count(FINAL_MARKER.encode()),
         "height": height,
         "password_cursor_matches_prompt": (
-            expected_prompt == actual_move if password_scenario else True
+            expected_prompt is not None
+            and actual_move is not None
+            and expected_prompt == actual_move
+            if password_scenario
+            else True
         ),
         "password_echo_suppressed": (
             echo_disabled and TEST_SECRET.encode() not in raw

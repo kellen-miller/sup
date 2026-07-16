@@ -34,6 +34,7 @@ from sup.display import (
 from sup.jobs import Job, config_path, load_jobs_config, resolve_job_selection
 from sup.logs import cleanup_old_runs, create_run_dir, tail_lines
 from sup.runner import CommandResult, JobResult, Runner
+from tests.terminal_harness import analyze
 
 
 ANSI_STYLE = re.compile(r"\x1b\[[0-9;]*m")
@@ -588,6 +589,37 @@ class RunnerTest(unittest.TestCase):
             ],
         )
 
+    def test_parallel_elapsed_excludes_serial_preflight_time(self):
+        now = [0.0]
+        job = Job(
+            name="ready",
+            label="Ready",
+            phase="parallel",
+            command=("ready",),
+            required_commands=(),
+            optional=False,
+            log_name="ready.log",
+            sudo_preflight=True,
+        )
+
+        def sudo_preflight(_job):
+            now[0] = 100.0
+            return True
+
+        def command_runner(_job):
+            now[0] = 101.0
+            return CommandResult(exit_code=0)
+
+        with tempfile.TemporaryDirectory() as tmp:
+            with patch("sup.runner.time.monotonic", side_effect=lambda: now[0]):
+                result = Runner(
+                    home=Path(tmp),
+                    sudo_preflight=sudo_preflight,
+                    command_runner=command_runner,
+                ).run([job])[0]
+
+        self.assertEqual(result.elapsed, 1.0)
+
     def test_sudo_preflight_uses_sup_password_prompt(self):
         runner = Runner(home=Path("/tmp/example-home"))
 
@@ -847,6 +879,40 @@ class CliTest(unittest.TestCase):
             )
         )
 
+    def test_sudo_overlay_treats_invisible_prompt_as_unavailable(self):
+        job = Job(
+            name="brew-upgrade",
+            label="Homebrew upgrade",
+            phase="core",
+            command=("brew", "upgrade"),
+            required_commands=("brew", "sudo"),
+            optional=False,
+            log_name="brew-upgrade.log",
+            sudo_preflight=True,
+        )
+        dashboard = LiveDashboard(
+            [job],
+            console=terminal_console(width=80, height=6),
+        )
+
+        self.assertFalse(
+            authenticate_sudo_with_overlay(
+                [job],
+                dashboard=dashboard,
+                sudo_ticket_available=lambda: False,
+                validator=lambda _password: self.fail("validator should not run"),
+            )
+        )
+        lines = dashboard.console.render_lines(
+            dashboard.render(),
+            dashboard.console.options,
+            pad=False,
+        )
+        rendered = "\n".join(
+            "".join(segment.text for segment in line) for line in lines
+        )
+        self.assertNotIn("Password:", rendered)
+
     def test_validate_sudo_password_uses_stdin_promptless_sudo(self):
         with patch("sup.cli.subprocess.run") as run:
             run.return_value.returncode = 0
@@ -1054,6 +1120,24 @@ class DisplayTest(unittest.TestCase):
         jobs = load_jobs_config(config_path()).jobs
 
         for width, height in ((80, 18), (120, 18), (120, 24), (120, 36)):
+            with self.subTest(width=width, height=height):
+                dashboard = LiveDashboard(
+                    jobs,
+                    console=terminal_console(width=width, height=height),
+                )
+
+                self.assertLessEqual(self.rendered_height(dashboard), height)
+
+    def test_live_dashboard_budgets_narrow_viewports(self):
+        jobs = load_jobs_config(config_path()).jobs
+
+        for width, height in (
+            (40, 18),
+            (30, 12),
+            (80, 3),
+            (80, 2),
+            (80, 1),
+        ):
             with self.subTest(width=width, height=height):
                 dashboard = LiveDashboard(
                     jobs,
@@ -1548,6 +1632,19 @@ class DisplayTest(unittest.TestCase):
         self.assertIn("✅", output)
         self.assertIn("succeeded", output)
         self.assertIn("rustup", output)
+
+
+class TerminalHarnessTest(unittest.TestCase):
+    def test_missing_password_prompt_does_not_match_missing_cursor_move(self):
+        result = analyze(
+            b"",
+            scenario="password",
+            width=80,
+            height=6,
+            echo_disabled=False,
+        )
+
+        self.assertFalse(result["password_cursor_matches_prompt"])
 
 
 if __name__ == "__main__":

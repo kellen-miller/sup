@@ -370,7 +370,7 @@ class OverlayRenderable:
             if prompt_start >= 0:
                 prompt_end = prompt_start + len("Password:")
                 return overlay_left + cell_len(text[:prompt_end]), overlay_top + row
-        raise RuntimeError("password prompt is not visible in the terminal viewport")
+        raise EOFError("password prompt is not visible in the terminal viewport")
 
     def _layout(self, console: Console, options: ConsoleOptions):
         base_lines = console.render_lines(self.base, options, pad=True)
@@ -454,7 +454,12 @@ def auth_overlay_panel(jobs: Iterable[Job], *, error: str | None = None) -> Pane
 
 
 def dashboard_status_text(subtitle: str, *, dimmed: bool = False) -> Text:
-    return Text(subtitle, style=theme_style(TOKYONIGHT["fg"], dimmed=dimmed))
+    return Text(
+        subtitle,
+        style=theme_style(TOKYONIGHT["fg"], dimmed=dimmed),
+        overflow="ellipsis",
+        no_wrap=True,
+    )
 
 
 def focused_dashboard(
@@ -474,20 +479,31 @@ def focused_dashboard(
         f"ok {counts['succeeded']} | skipped {counts['skipped']} | "
         f"failed {counts['failed']}"
     )
+    status = dashboard_status_text(subtitle, dimmed=dimmed)
+    meter = mission_meter(statuses.values(), dimmed=dimmed)
+    if height <= 1:
+        return Group(status)
+    if height == 2:
+        return Group(status, meter)
+
     ordered_jobs = sorted_jobs(jobs, statuses)
     job_capacity = max(0, height - 3)
     omitted = max(0, len(ordered_jobs) - job_capacity)
-    if omitted:
+    if omitted and job_capacity:
         visible_jobs = ordered_jobs[: max(0, job_capacity - 1)]
         omitted = len(ordered_jobs) - len(visible_jobs)
         used_job_rows = len(visible_jobs) + 1
+    elif omitted:
+        visible_jobs = []
+        omitted = 0
+        used_job_rows = 0
     else:
         visible_jobs = ordered_jobs
         used_job_rows = len(visible_jobs)
 
     items = [
-        dashboard_status_text(subtitle, dimmed=dimmed),
-        mission_meter(statuses.values(), dimmed=dimmed),
+        status,
+        meter,
         focused_jobs_table(
             visible_jobs,
             statuses,
@@ -795,7 +811,7 @@ def mission_meter(
     complete = counts["succeeded"] + counts["skipped"] + counts["failed"]
     filled = 0 if total == 0 else round(width * complete / total)
     bar = "█" * filled + "░" * (width - filled)
-    text = Text()
+    text = Text(overflow="ellipsis", no_wrap=True)
     text.append("mission burn ", style=theme_style(TOKYONIGHT["muted"], dimmed=dimmed))
     text.append(
         f"{complete}/{total} ",

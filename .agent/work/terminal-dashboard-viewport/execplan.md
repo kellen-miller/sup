@@ -56,9 +56,10 @@ presentation, and `SudoAuthenticator` remains ignorant of terminal coordinates.
   main thread before ready commands are submitted to workers.
 - [x] (2026-07-16 02:07Z) Added and ran the synthetic PTY harness for password
   input at 80x18 and 120x24 and signal cleanup at 80x18.
-- [ ] Run required validation and all three reviews against this plan and
-  `decision.md`. Validation, recent-work review, and formal two-axis review are
-  complete; adversarial review remains.
+- [x] (2026-07-16 02:51Z) Ran the required validation and all three reviews
+  against this plan and `decision.md`. The adversarial implementation review's
+  one medium and four low findings were verified and resolved or recorded; the
+  final suite contains 69 tests and every acceptance command exits zero.
 
 ## Surprises & Discoveries
 
@@ -128,6 +129,26 @@ presentation, and `SudoAuthenticator` remains ignorant of terminal coordinates.
   options while the dashboard independently reads `console.size.height` for
   its own budget. Raw checks also require screen entry before the first frame
   and a home move after entry.
+- Observation: a password modal cannot expose its `Password:` cell in a
+  terminal six rows tall or shorter, and the original coordinate failure
+  escaped as an uncaught `RuntimeError`.
+  Evidence: the adversarial review reproduced the abort at 80x6. The display
+  now reports unavailable input as `EOFError`, which the sudo boundary already
+  maps to required-job failure or optional-job skip without a traceback.
+- Observation: the status summary and mission meter wrapped below roughly 58
+  columns even though the row budget counted each as one row.
+  Evidence: the pre-fix 40x18 render used 19 or more rows and the harness failed
+  `budgeted_frame_fits`. Both texts now ellipsize without wrapping; unit cases
+  at 40x18 and 30x12 and a real password PTY at 40x18 pass. A final sweep also
+  exposed a four-row minimum at one-, two-, and three-row heights; compact
+  status-only fallbacks removed it, and all 504 checked geometries from 20 to
+  120 columns and one to 24 rows now fit before Rich cropping.
+- Observation: recording elapsed time during `_prepare` caused an instant
+  parallel command to inherit the time spent waiting for a later job's sudo
+  prompt.
+  Evidence: the adversarial probe reported 0.406 seconds for an instant command
+  beside a 0.4-second preflight. A deterministic regression now proves only the
+  interval inside `_execute` is reported.
 
 ## Decision Log
 
@@ -172,17 +193,41 @@ presentation, and `SudoAuthenticator` remains ignorant of terminal coordinates.
   intentionally different views; bundling state or test doubles would add
   indirection without a second production consumer.
   Date/Author: 2026-07-16 / Codex formal-review resolution.
+- Decision: treat a password prompt that cannot fit in the current viewport as
+  unavailable input rather than attempting an off-screen or uncentered prompt.
+  Rationale: hidden input must never detach from its visible label; existing
+  auth policy already handles unavailable input safely and preserves job
+  requiredness semantics.
+  Date/Author: 2026-07-16 / Codex adversarial-review resolution.
+- Decision: make fixed-budget header rows no-wrap and measure command elapsed
+  time only inside `_execute`.
+  Rationale: the display's row accounting must remain true at narrow widths,
+  and human authentication time is not command execution time.
+  Date/Author: 2026-07-16 / Codex adversarial-review resolution.
 
 ## Outcomes & Retrospective
 
-Implementation and behavioral validation are complete. The dashboard uses a
-bounded focused alternate screen, password entry lands on the modal's rendered
-prompt cell with real PTY echo suppression, and runner preparation guarantees
-that prompting stays on the main thread before worker execution. A fresh-eyes
-recent-work pass found no correctness, scope, or simplicity-boundary defect;
-formal review found and resolved entry cleanup, prompt ambiguity, portability,
-and validation-evidence defects. Adversarial review remains before final
-completion.
+Implementation, behavioral validation, and review are complete. The dashboard
+uses a bounded focused alternate screen, including narrow terminals; password
+entry lands on the modal's rendered prompt cell with real PTY echo suppression;
+and an impossibly short password viewport degrades to safe auth-unavailable
+behavior. Runner preparation guarantees prompting stays on the main thread
+before worker execution, while elapsed time measures execution only.
+
+A fresh-eyes recent-work pass found no correctness, scope, or
+simplicity-boundary defect. Formal review found and resolved entry cleanup,
+prompt ambiguity, portability, and validation-evidence defects. The independent
+adversarial review found no critical or high issue; its short-viewport,
+narrow-width, elapsed-time, and PTY-oracle findings are fixed, while its note
+about the cursor unit test sharing the render pipeline is covered by the
+independent raw-byte PTY oracle.
+
+Final evidence is 69 passing tests locally and on Python 3.10 with Rich 13.0.0,
+Ruff format and lint, byte compilation, `git diff --check`, `uv build`, a safe
+`sup --dry-run`, the four canonical PTY runs, and an additional 40x18 password
+PTY run. Every command exits zero; PTY output shows paired alternate-screen and
+cursor controls, exact password cursor placement, suppressed echo, one final
+marker after screen exit, and zero relative cursor-up rows.
 
 ## Context and Orientation
 
@@ -489,6 +534,7 @@ and non-obvious control assertions; every other schema boolean was also true:
 
     password 80x18: cursor_match=true echo_suppressed=true cursor_up_rows=0
     password 120x24: cursor_match=true echo_suppressed=true cursor_up_rows=0
+    password 40x18: cursor_match=true echo_suppressed=true cursor_up_rows=0
     sigint 80x18: screen_exit_before_final=true cursor_controls_paired=true
     sigterm 80x18: screen_exit_before_final=true cursor_controls_paired=true
 
@@ -553,8 +599,9 @@ per-job transitions, and configured result order.
 All passwords remain absent from dashboard text, logs, failure reasons, harness
 JSON, and test diagnostics. No new runtime dependency appears in
 `pyproject.toml` or `uv.lock`. The full required validation suite, the Python
-3.10/Rich 13 floor suite, and all four harmless harness runs exit zero. The
-unit-test count is at least 63 and no old-contract test is silently deleted.
+3.10/Rich 13 floor suite, all four planned harness runs, and the additional
+narrow-width harness run exit zero. The unit-test count is 69 and no
+old-contract test is silently deleted.
 
 ## Idempotence and Recovery
 
