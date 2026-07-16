@@ -10,7 +10,7 @@ the user's normal terminal and print the final summary once.
 
 ## Worktree and provenance
 
-- Worktree: `/Users/kellen/development/github/kellen-miller/sup/.worktrees/fix-interactive-terminal`
+- Worktree: repository root (the current checkout)
 - Branch: `codex/fix-interactive-terminal`
 - Base ref and commit: `main` at `2a4310f4f50ab30bef085102189e720f439104e1`
 - Upstream: none; the branch is local only.

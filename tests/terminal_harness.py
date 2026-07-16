@@ -32,6 +32,7 @@ SIGNAL_READY = b"\x1b]999;SUP-HARNESS-READY\x07"
 CSI = re.compile(rb"\x1b\[[0-?]*[ -/]*[@-~]")
 ABSOLUTE_MOVE = re.compile(rb"\x1b\[(\d+);(\d+)H")
 RELATIVE_UP = re.compile(rb"\x1b\[(\d*)A")
+HOME_MOVE = re.compile(rb"\x1b\[(?:H|1;1H)")
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -227,8 +228,10 @@ def budgeted_frame_fits(*, width: int, height: int) -> bool:
     dashboard = LiveDashboard(jobs, console=console)
     dashboard.update(jobs[0].name, "running", output="checking metadata")
     dashboard.update(jobs[1].name, "failed", output="synthetic failure")
-    options = console.options.update(width=width, height=height)
-    return len(console.render_lines(dashboard.render(), options, pad=False)) <= height
+    return (
+        len(console.render_lines(dashboard.render(), console.options, pad=False))
+        <= height
+    )
 
 
 def analyze(
@@ -243,16 +246,26 @@ def analyze(
     exit_count = raw.count(ALT_SCREEN_EXIT)
     show_count = raw.count(CURSOR_SHOW)
     hide_count = raw.count(CURSOR_HIDE)
+    enter_position = raw.find(ALT_SCREEN_ENTER)
+    first_frame_position = raw.find(b"queued")
+    home_match = HOME_MOVE.search(raw)
     final_position = raw.find(FINAL_MARKER.encode())
     exit_position = raw.rfind(ALT_SCREEN_EXIT)
     password_scenario = scenario == "password"
     expected_prompt = prompt_cell(raw) if password_scenario else None
     actual_move = final_password_move(raw) if password_scenario else None
     return {
-        "alternate_screen_entered": enter_count == 1,
+        "alternate_screen_entered": (
+            enter_count == 1 and first_frame_position > enter_position >= 0
+        ),
         "alternate_screen_exited": exit_count == 1,
         "budgeted_frame_fits": budgeted_frame_fits(width=width, height=height),
-        "cursor_controls_paired": show_count == hide_count and show_count > 0,
+        "cursor_controls_paired": (
+            show_count == hide_count
+            and show_count > 0
+            and home_match is not None
+            and home_match.start() > enter_position
+        ),
         "final_marker_count": raw.count(FINAL_MARKER.encode()),
         "height": height,
         "password_cursor_matches_prompt": (

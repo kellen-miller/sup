@@ -125,7 +125,20 @@ class LiveDashboard:
             auto_refresh=False,
             vertical_overflow="crop",
         )
-        self._live.__enter__()
+        try:
+            self._live.__enter__()
+        except BaseException:
+            alt_screen_known = bool(getattr(self._live, "_alt_screen", False))
+            stop_failed = False
+            try:
+                self._live.stop()
+            except BaseException:
+                stop_failed = True
+            self.console.show_cursor(True)
+            if not alt_screen_known or stop_failed:
+                self.console.set_alt_screen(False)
+            self._live = None
+            raise
         return self
 
     def __exit__(self, exc_type, exc, tb) -> None:
@@ -195,14 +208,10 @@ class LiveDashboard:
     def _password_cursor_position(self) -> tuple[int, int]:
         size = self.console.size
         options = self.console.options.update(width=size.width, height=size.height)
-        lines = self.console.render_lines(self.render(), options, pad=True)
-        for row, line in enumerate(lines):
-            text = "".join(segment.text for segment in line if not segment.control)
-            prompt_start = text.find("Password:")
-            if prompt_start >= 0:
-                prompt_end = prompt_start + len("Password:")
-                return cell_len(text[:prompt_end]), row
-        raise RuntimeError("password prompt is not visible in the terminal viewport")
+        renderable = self.render()
+        if not isinstance(renderable, OverlayRenderable):
+            raise RuntimeError("password modal is not active")
+        return renderable.password_cursor_position(self.console, options)
 
     def __rich__(self):
         return self.render(advance=True)
@@ -310,28 +319,18 @@ class OverlayRenderable:
         self.height = height
 
     def __rich_console__(self, console: Console, options: ConsoleOptions):
-        base_lines = console.render_lines(self.base, options, pad=True)
-        base_width = options.max_width
-        base_height = max(1, self.height)
-        base_lines = base_lines[:base_height]
-        base_lines.extend(
-            [[Segment(" " * base_width)] for _ in range(base_height - len(base_lines))]
-        )
+        (
+            base_lines,
+            base_width,
+            base_height,
+            overlay_lines,
+            overlay_width,
+            overlay_height,
+            overlay_top,
+            overlay_left,
+        ) = self._layout(console, options)
         if base_width <= 0 or base_height <= 0:
             return
-
-        overlay_width_limit = max(1, min(OVERLAY_MAX_WIDTH, base_width - 4))
-        overlay_options = options.update(width=overlay_width_limit, height=None)
-        overlay_lines = console.render_lines(
-            self.overlay,
-            overlay_options,
-            pad=False,
-        )
-        overlay_width, overlay_height = Segment.get_shape(overlay_lines)
-        overlay_width = min(overlay_width, base_width)
-        overlay_height = min(overlay_height, base_height)
-        overlay_top = max(0, (base_height - overlay_height) // 2)
-        overlay_left = max(0, (base_width - overlay_width) // 2)
 
         for line_number, base_line in enumerate(base_lines):
             line = Segment.adjust_line_length(base_line, base_width, pad=True)
@@ -351,6 +350,61 @@ class OverlayRenderable:
                 )
             yield from line
             yield Segment.line()
+
+    def password_cursor_position(
+        self, console: Console, options: ConsoleOptions
+    ) -> tuple[int, int]:
+        (
+            _base_lines,
+            _base_width,
+            _base_height,
+            overlay_lines,
+            _overlay_width,
+            overlay_height,
+            overlay_top,
+            overlay_left,
+        ) = self._layout(console, options)
+        for row, line in enumerate(overlay_lines[:overlay_height]):
+            text = "".join(segment.text for segment in line if not segment.control)
+            prompt_start = text.find("Password:")
+            if prompt_start >= 0:
+                prompt_end = prompt_start + len("Password:")
+                return overlay_left + cell_len(text[:prompt_end]), overlay_top + row
+        raise RuntimeError("password prompt is not visible in the terminal viewport")
+
+    def _layout(self, console: Console, options: ConsoleOptions):
+        base_lines = console.render_lines(self.base, options, pad=True)
+        base_width = options.max_width
+        base_height = max(1, self.height)
+        base_lines = base_lines[:base_height]
+        base_lines.extend(
+            [[Segment(" " * base_width)] for _ in range(base_height - len(base_lines))]
+        )
+        if base_width <= 0 or base_height <= 0:
+            return base_lines, base_width, base_height, [], 0, 0, 0, 0
+
+        overlay_width_limit = max(1, min(OVERLAY_MAX_WIDTH, base_width - 4))
+        overlay_options = options.update(width=overlay_width_limit, height=None)
+        overlay_lines = console.render_lines(
+            self.overlay,
+            overlay_options,
+            pad=False,
+        )
+        overlay_width, overlay_height = Segment.get_shape(overlay_lines)
+        overlay_width = min(overlay_width, base_width)
+        overlay_height = min(overlay_height, base_height)
+        overlay_top = max(0, (base_height - overlay_height) // 2)
+        overlay_left = max(0, (base_width - overlay_width) // 2)
+        return (
+            base_lines,
+            base_width,
+            base_height,
+            overlay_lines,
+            overlay_width,
+            overlay_height,
+            overlay_top,
+            overlay_left,
+        )
 
 
 def overlay_segments(
@@ -537,28 +591,12 @@ def output_dock(
 def planning_jobs_view(
     jobs: list[Job],
     statuses: dict[str, str],
-    *,
-    elapsed: dict[str, str] | None = None,
-    exit_codes: dict[str, str] | None = None,
-    output_lines: dict[str, deque[str]] | None = None,
-    frame: int = 0,
-    dimmed: bool = False,
 ) -> Group:
     sections = []
     for phase in job_phases(jobs):
         phase_jobs = [job for job in jobs if job.phase == phase]
-        sections.append(phase_heading(phase, dimmed=dimmed))
-        sections.append(
-            planning_jobs_table(
-                phase_jobs,
-                statuses,
-                elapsed=elapsed,
-                exit_codes=exit_codes,
-                output_lines=output_lines,
-                frame=frame,
-                dimmed=dimmed,
-            )
-        )
+        sections.append(phase_heading(phase))
+        sections.append(planning_jobs_table(phase_jobs, statuses))
     return Group(*sections)
 
 
@@ -570,33 +608,24 @@ def job_phases(jobs: list[Job]) -> list[str]:
     return phases
 
 
-def phase_heading(phase: str, *, dimmed: bool = False) -> Rule:
+def phase_heading(phase: str) -> Rule:
     label = PHASE_LABEL.get(phase, phase)
     return Rule(
-        Text(label, style=theme_style(TOKYONIGHT["purple"], bold=True, dimmed=dimmed)),
-        style=theme_style(TOKYONIGHT["muted"], dimmed=dimmed),
+        Text(label, style=theme_style(TOKYONIGHT["purple"], bold=True)),
+        style=TOKYONIGHT["muted"],
     )
 
 
 def planning_jobs_table(
     jobs: list[Job],
     statuses: dict[str, str],
-    *,
-    elapsed: dict[str, str] | None = None,
-    exit_codes: dict[str, str] | None = None,
-    output_lines: dict[str, deque[str]] | None = None,
-    frame: int = 0,
-    dimmed: bool = False,
 ) -> Table:
-    elapsed = elapsed or {}
-    exit_codes = exit_codes or {}
-    output_lines = output_lines or {}
     table = Table(
         box=box.SIMPLE_HEAVY,
         expand=True,
         show_lines=False,
-        header_style=theme_style(TOKYONIGHT["cyan"], bold=True, dimmed=dimmed),
-        border_style=theme_style(TOKYONIGHT["muted"], dimmed=dimmed),
+        header_style=theme_style(TOKYONIGHT["cyan"], bold=True),
+        border_style=TOKYONIGHT["muted"],
     )
     table.add_column("signal", no_wrap=True)
     table.add_column("stage", width=6, no_wrap=True)
@@ -615,19 +644,13 @@ def planning_jobs_table(
     for job in sorted_jobs(jobs, statuses):
         status = statuses.get(job.name, "queued")
         table.add_row(
-            status_label(status, dimmed=dimmed),
-            phase_tag(job.phase, dimmed=dimmed),
-            job_cell(job, dimmed=dimmed),
-            progress_bar(status, width=12, frame=frame, dimmed=dimmed),
-            output_cell(output_lines.get(job.name, ()), dimmed=dimmed),
-            Text(
-                elapsed.get(job.name, "-"),
-                style=theme_style(TOKYONIGHT["fg"], dimmed=dimmed),
-            ),
-            Text(
-                exit_codes.get(job.name, "-"),
-                style=theme_style(TOKYONIGHT["fg"], dimmed=dimmed),
-            ),
+            status_label(status),
+            phase_tag(job.phase),
+            job_cell(job),
+            progress_bar(status, width=12),
+            Text("-", style=TOKYONIGHT["muted"]),
+            Text("-", style=TOKYONIGHT["fg"]),
+            Text("-", style=TOKYONIGHT["fg"]),
         )
     return table
 
@@ -676,31 +699,17 @@ def phase_tag(phase: str, *, dimmed: bool = False) -> Text:
     )
 
 
-def job_cell(job: Job, *, dimmed: bool = False) -> Text:
+def job_cell(job: Job) -> Text:
     cell = Text()
     cell.append(
         job.name,
-        style=theme_style(TOKYONIGHT["fg"], bold=True, dimmed=dimmed),
+        style=theme_style(TOKYONIGHT["fg"], bold=True),
     )
     cell.append("\n")
     cell.append(
         display_command(job.command),
-        style=theme_style(TOKYONIGHT["muted"], dimmed=dimmed),
+        style=TOKYONIGHT["muted"],
     )
-    return cell
-
-
-def output_cell(lines: Iterable[str], *, dimmed: bool = False) -> Text:
-    recent = [line.strip() for line in lines if line.strip()]
-    if not recent:
-        return Text("-", style=theme_style(TOKYONIGHT["muted"], dimmed=dimmed))
-
-    cell = Text()
-    for index, line in enumerate(recent):
-        if index:
-            cell.append("\n")
-        cell.append("› ", style=theme_style(TOKYONIGHT["cyan"], dimmed=dimmed))
-        cell.append(line, style=theme_style(TOKYONIGHT["fg"], dimmed=dimmed))
     return cell
 
 

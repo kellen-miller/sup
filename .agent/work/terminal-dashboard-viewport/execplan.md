@@ -57,8 +57,8 @@ presentation, and `SudoAuthenticator` remains ignorant of terminal coordinates.
 - [x] (2026-07-16 02:07Z) Added and ran the synthetic PTY harness for password
   input at 80x18 and 120x24 and signal cleanup at 80x18.
 - [ ] Run required validation and all three reviews against this plan and
-  `decision.md`. Validation and the recent-work review are complete; formal and
-  adversarial review remain.
+  `decision.md`. Validation, recent-work review, and formal two-axis review are
+  complete; adversarial review remains.
 
 ## Surprises & Discoveries
 
@@ -110,6 +110,24 @@ presentation, and `SudoAuthenticator` remains ignorant of terminal coordinates.
   had no paired exit. The harness now emits an invisible ready control from
   inside the active context; SIGINT and SIGTERM then both pair screen and cursor
   controls and place the final marker after screen exit.
+- Observation: formal spec review found a narrower entry-window failure: a
+  signal after Rich emitted alternate-screen entry but before assigning its
+  internal state could make `Live.stop()` unaware that cleanup was needed.
+  Evidence: a red regression console raised from `set_alt_screen(True)` after
+  emitting the control; `LiveDashboard.__enter__` now explicitly restores the
+  cursor and exits the alternate screen when Rich cannot do so itself.
+- Observation: scanning the composed dashboard for the first `Password:` was
+  ambiguous when a job name contained that text above the modal.
+  Evidence: the red decoy-name test moved to row 4, column 28 instead of the
+  modal at row 11, column 44. Cursor discovery now scans only the actual overlay
+  segments used by the shared overlay layout.
+- Observation: the PTY harness initially supplied `height` in Rich render
+  options while measuring its pre-crop frame, making the evidence susceptible
+  to the exact cropping tautology the plan prohibited.
+  Evidence: `budgeted_frame_fits` now renders with unbounded-height console
+  options while the dashboard independently reads `console.size.height` for
+  its own budget. Raw checks also require screen entry before the first frame
+  and a home move after entry.
 
 ## Decision Log
 
@@ -142,6 +160,18 @@ presentation, and `SudoAuthenticator` remains ignorant of terminal coordinates.
   Rationale: terminal input and signal cleanup must share the main thread;
   worker threads should only run already-prepared commands.
   Date/Author: 2026-07-15 / Codex planning improvement.
+- Decision: do not print the grouped job summary after an interrupted run.
+  Rationale: interruption leaves no complete result set, and existing CLI
+  behavior intentionally prints a dedicated interruption notice after terminal
+  restoration. The formal review claim broadened the ordinary-completion
+  summary requirement beyond the approved execution semantics.
+  Date/Author: 2026-07-16 / Codex formal-review resolution.
+- Decision: reject new render-state and shared table/test-stub abstractions from
+  the standards smell pass, while removing unused planning-table parameters.
+  Rationale: focused live rendering and command-rich dry-run rendering are
+  intentionally different views; bundling state or test doubles would add
+  indirection without a second production consumer.
+  Date/Author: 2026-07-16 / Codex formal-review resolution.
 
 ## Outcomes & Retrospective
 
@@ -150,13 +180,14 @@ bounded focused alternate screen, password entry lands on the modal's rendered
 prompt cell with real PTY echo suppression, and runner preparation guarantees
 that prompting stays on the main thread before worker execution. A fresh-eyes
 recent-work pass found no correctness, scope, or simplicity-boundary defect;
-formal and adversarial reviews remain before final completion.
+formal review found and resolved entry cleanup, prompt ambiguity, portability,
+and validation-evidence defects. Adversarial review remains before final
+completion.
 
 ## Context and Orientation
 
-The repository is a Python 3.10+ CLI. Work from
-`/Users/kellen/development/github/kellen-miller/sup/.worktrees/fix-interactive-terminal`
-on branch `codex/fix-interactive-terminal`, based on `main` commit
+The repository is a Python 3.10+ CLI. Work from the repository root on branch
+`codex/fix-interactive-terminal`, based on `main` commit
 `2a4310f4f50ab30bef085102189e720f439104e1`. The branch has no upstream.
 
 `src/sup/cli.py` parses arguments, creates the Rich `Console`, enters
@@ -433,8 +464,7 @@ checks before setting `meta.json` to `stage="implementation"` and
 
 ## Concrete Steps
 
-Run every command from
-`/Users/kellen/development/github/kellen-miller/sup/.worktrees/fix-interactive-terminal`.
+Run every command from the repository root.
 
 First run the new targeted tests during the red and green cycles:
 

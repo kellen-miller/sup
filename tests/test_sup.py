@@ -1351,6 +1351,48 @@ class DisplayTest(unittest.TestCase):
         self.assertEqual(small_actual, small_expected)
         self.assertNotEqual(small_actual, large_actual)
 
+    def test_password_cursor_ignores_password_text_in_job_name(self):
+        jobs = [
+            Job(
+                name="Password: decoy",
+                label="Decoy",
+                phase="core",
+                command=("decoy",),
+                required_commands=(),
+                optional=True,
+                log_name="decoy.log",
+            ),
+            *load_jobs_config(config_path()).jobs[:12],
+        ]
+        console = terminal_console(width=120, height=18)
+        dashboard = LiveDashboard(jobs, console=console)
+        expected = None
+
+        def reader():
+            nonlocal expected
+            size = console.size
+            lines = console.render_lines(
+                dashboard.render(),
+                console.options.update(width=size.width, height=size.height),
+                pad=False,
+            )
+            occurrences = []
+            for row, line in enumerate(lines):
+                text = "".join(segment.text for segment in line)
+                if "Password:" in text:
+                    column = cell_len(
+                        text[: text.index("Password:") + len("Password:")]
+                    )
+                    occurrences.append((row + 1, column + 1))
+            self.assertEqual(len(occurrences), 2)
+            expected = occurrences[-1]
+            return "secret"
+
+        dashboard.read_password(jobs[1:2], reader=reader)
+        moves = re.findall(r"\x1b\[(\d+);(\d+)H", console.file.getvalue())
+
+        self.assertEqual(tuple(map(int, moves[-1])), expected)
+
     def test_sudo_auth_overlay_does_not_reflow_dashboard(self):
         jobs = load_jobs_config(config_path()).jobs
         console = terminal_console(width=160, height=25)
@@ -1412,6 +1454,33 @@ class DisplayTest(unittest.TestCase):
             vertical_overflow="crop",
         )
         live.return_value.update.assert_called_once_with(dashboard, refresh=True)
+
+    def test_live_dashboard_restores_terminal_when_entry_is_interrupted(self):
+        jobs = load_jobs_config(config_path()).jobs[:1]
+
+        class InterruptedConsole(Console):
+            def set_alt_screen(self, enable: bool = True):
+                changed = super().set_alt_screen(enable)
+                if enable:
+                    raise KeyboardInterrupt
+                return changed
+
+        console = InterruptedConsole(
+            file=io.StringIO(),
+            force_terminal=True,
+            width=80,
+            height=18,
+            _environ={"TERM": "xterm-256color"},
+        )
+        dashboard = LiveDashboard(jobs, console=console)
+
+        with self.assertRaises(KeyboardInterrupt):
+            dashboard.__enter__()
+
+        output = console.file.getvalue()
+        self.assertEqual(output.count("\x1b[?1049h"), 1)
+        self.assertEqual(output.count("\x1b[?1049l"), 1)
+        self.assertGreater(output.rfind("\x1b[?25h"), output.rfind("\x1b[?25l"))
 
     def test_live_dashboard_throttles_output_refreshes(self):
         jobs = [
