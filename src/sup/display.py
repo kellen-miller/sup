@@ -1,12 +1,15 @@
 from __future__ import annotations
 
+import getpass
 import time
 from collections import defaultdict, deque
 from pathlib import Path
 from typing import Callable, Iterable
 
 from rich import box
+from rich.cells import cell_len
 from rich.console import Console, ConsoleOptions, Group
+from rich.control import Control
 from rich.live import Live
 from rich.panel import Panel
 from rich.rule import Rule
@@ -65,10 +68,10 @@ PHASE_LABEL = {
 
 STATUS_SORT = {
     "running": 0,
-    "queued": 1,
-    "failed": 2,
-    "skipped": 2,
-    "succeeded": 2,
+    "failed": 1,
+    "queued": 2,
+    "skipped": 3,
+    "succeeded": 4,
 }
 
 
@@ -85,7 +88,7 @@ def render_dry_run(jobs: list[Job], *, console: Console) -> None:
                     ),
                 ),
                 mission_meter(statuses.values()),
-                jobs_view(jobs, statuses),
+                planning_jobs_view(jobs, statuses),
             ),
             title="SUP MISSION CONTROL",
             border_style=TOKYONIGHT["blue"],
@@ -106,9 +109,7 @@ class LiveDashboard:
         self.statuses = {job.name: "queued" for job in jobs}
         self.elapsed = {job.name: "-" for job in jobs}
         self.exit_codes = {job.name: "-" for job in jobs}
-        self.output_lines: dict[str, deque[str]] = {
-            job.name: deque(maxlen=OUTPUT_TAIL_LINES) for job in jobs
-        }
+        self.recent_output: deque[tuple[str, str]] = deque(maxlen=OUTPUT_TAIL_LINES)
         self.frame = 0
         self._live: Live | None = None
         self._clock = clock or time.monotonic
@@ -120,10 +121,24 @@ class LiveDashboard:
         self._live = Live(
             self,
             console=self.console,
+            screen=True,
             auto_refresh=False,
-            vertical_overflow="visible",
+            vertical_overflow="crop",
         )
-        self._live.__enter__()
+        try:
+            self._live.__enter__()
+        except BaseException:
+            alt_screen_known = bool(getattr(self._live, "_alt_screen", False))
+            stop_failed = False
+            try:
+                self._live.stop()
+            except BaseException:
+                stop_failed = True
+            self.console.show_cursor(True)
+            if not alt_screen_known or stop_failed:
+                self.console.set_alt_screen(False)
+            self._live = None
+            raise
         return self
 
     def __exit__(self, exc_type, exc, tb) -> None:
@@ -139,14 +154,11 @@ class LiveDashboard:
     ) -> None:
         self.statuses[name] = status
         output_added = False
-        had_output = bool(self.output_lines.get(name))
+        had_output = bool(self.recent_output)
         if output is not None:
             line = output.strip()
             if line:
-                self.output_lines.setdefault(
-                    name,
-                    deque(maxlen=OUTPUT_TAIL_LINES),
-                ).append(line)
+                self.recent_output.append((name, line))
                 output_added = True
         if result is not None:
             self.elapsed[name] = f"{result.elapsed:.1f}s"
@@ -169,52 +181,55 @@ class LiveDashboard:
         if refresh:
             self._last_refresh_at = now
 
-    def show_auth_overlay(
+    def read_password(
         self,
         jobs: Iterable[Job],
         *,
         error: str | None = None,
-    ) -> None:
+        reader: Callable[[], str] | None = None,
+    ) -> str:
         self._auth_overlay_jobs = tuple(jobs)
         self._auth_overlay_error = error
         self._refresh_live(force=True)
+        try:
+            column, row = self._password_cursor_position()
+            self.console.control(
+                Control.show_cursor(True),
+                Control.move_to(column, row),
+            )
+            self.console.file.flush()
+            return (reader or (lambda: getpass.getpass("")))()
+        finally:
+            self.console.control(Control.show_cursor(False))
+            self._auth_overlay_jobs = ()
+            self._auth_overlay_error = None
+            self._refresh_live(force=True)
 
-    def clear_auth_overlay(self) -> None:
-        self._auth_overlay_jobs = ()
-        self._auth_overlay_error = None
-        self._refresh_live(force=True)
+    def _password_cursor_position(self) -> tuple[int, int]:
+        size = self.console.size
+        options = self.console.options.update(width=size.width, height=size.height)
+        renderable = self.render()
+        if not isinstance(renderable, OverlayRenderable):
+            raise RuntimeError("password modal is not active")
+        return renderable.password_cursor_position(self.console, options)
 
-    def __rich__(self) -> Panel:
+    def __rich__(self):
         return self.render(advance=True)
 
-    def render(self, *, advance: bool = False) -> Panel:
+    def render(self, *, advance: bool = False):
         frame = self.frame
         if advance and any(status == "running" for status in self.statuses.values()):
             self.frame += 1
-        counts = status_counts(self.statuses.values())
-        subtitle = (
-            f"queued {counts['queued']} | running {counts['running']} | "
-            f"ok {counts['succeeded']} | skipped {counts['skipped']} | failed {counts['failed']}"
-        )
         has_auth_overlay = bool(self._auth_overlay_jobs)
-        items = [
-            dashboard_status_text(subtitle, dimmed=has_auth_overlay),
-            mission_meter(self.statuses.values(), dimmed=has_auth_overlay),
-            jobs_view(
-                self.jobs,
-                self.statuses,
-                elapsed=self.elapsed,
-                exit_codes=self.exit_codes,
-                output_lines=self.output_lines,
-                frame=frame,
-                dimmed=has_auth_overlay,
-            ),
-        ]
-        dashboard = themed_panel(
-            Group(*items),
-            title=None,
-            border_style=TOKYONIGHT["purple"],
-            panel_box=box.ROUNDED,
+        dashboard = focused_dashboard(
+            self.jobs,
+            self.statuses,
+            elapsed=self.elapsed,
+            exit_codes=self.exit_codes,
+            recent_output=self.recent_output,
+            frame=frame,
+            height=self.console.size.height,
+            dimmed=has_auth_overlay,
         )
         if not has_auth_overlay:
             return dashboard
@@ -224,6 +239,7 @@ class LiveDashboard:
                 self._auth_overlay_jobs,
                 error=self._auth_overlay_error,
             ),
+            height=self.console.size.height,
         )
 
 
@@ -297,28 +313,24 @@ def header_text(title: str, subtitle: str) -> Text:
 
 
 class OverlayRenderable:
-    def __init__(self, base, overlay) -> None:
+    def __init__(self, base, overlay, *, height: int) -> None:
         self.base = base
         self.overlay = overlay
+        self.height = height
 
     def __rich_console__(self, console: Console, options: ConsoleOptions):
-        base_lines = console.render_lines(self.base, options, pad=True)
-        base_width, base_height = Segment.get_shape(base_lines)
+        (
+            base_lines,
+            base_width,
+            base_height,
+            overlay_lines,
+            overlay_width,
+            overlay_height,
+            overlay_top,
+            overlay_left,
+        ) = self._layout(console, options)
         if base_width <= 0 or base_height <= 0:
             return
-
-        overlay_width_limit = max(1, min(OVERLAY_MAX_WIDTH, base_width - 4))
-        overlay_options = options.update(width=overlay_width_limit)
-        overlay_lines = console.render_lines(
-            self.overlay,
-            overlay_options,
-            pad=False,
-        )
-        overlay_width, overlay_height = Segment.get_shape(overlay_lines)
-        overlay_width = min(overlay_width, base_width)
-        overlay_height = min(overlay_height, base_height)
-        overlay_top = max(0, (base_height - overlay_height) // 2)
-        overlay_left = max(0, (base_width - overlay_width) // 2)
 
         for line_number, base_line in enumerate(base_lines):
             line = Segment.adjust_line_length(base_line, base_width, pad=True)
@@ -338,6 +350,61 @@ class OverlayRenderable:
                 )
             yield from line
             yield Segment.line()
+
+    def password_cursor_position(
+        self, console: Console, options: ConsoleOptions
+    ) -> tuple[int, int]:
+        (
+            _base_lines,
+            _base_width,
+            _base_height,
+            overlay_lines,
+            _overlay_width,
+            overlay_height,
+            overlay_top,
+            overlay_left,
+        ) = self._layout(console, options)
+        for row, line in enumerate(overlay_lines[:overlay_height]):
+            text = "".join(segment.text for segment in line if not segment.control)
+            prompt_start = text.find("Password:")
+            if prompt_start >= 0:
+                prompt_end = prompt_start + len("Password:")
+                return overlay_left + cell_len(text[:prompt_end]), overlay_top + row
+        raise EOFError("password prompt is not visible in the terminal viewport")
+
+    def _layout(self, console: Console, options: ConsoleOptions):
+        base_lines = console.render_lines(self.base, options, pad=True)
+        base_width = options.max_width
+        base_height = max(1, self.height)
+        base_lines = base_lines[:base_height]
+        base_lines.extend(
+            [[Segment(" " * base_width)] for _ in range(base_height - len(base_lines))]
+        )
+        if base_width <= 0 or base_height <= 0:
+            return base_lines, base_width, base_height, [], 0, 0, 0, 0
+
+        overlay_width_limit = max(1, min(OVERLAY_MAX_WIDTH, base_width - 4))
+        overlay_options = options.update(width=overlay_width_limit, height=None)
+        overlay_lines = console.render_lines(
+            self.overlay,
+            overlay_options,
+            pad=False,
+        )
+        overlay_width, overlay_height = Segment.get_shape(overlay_lines)
+        overlay_width = min(overlay_width, base_width)
+        overlay_height = min(overlay_height, base_height)
+        overlay_top = max(0, (base_height - overlay_height) // 2)
+        overlay_left = max(0, (base_width - overlay_width) // 2)
+        return (
+            base_lines,
+            base_width,
+            base_height,
+            overlay_lines,
+            overlay_width,
+            overlay_height,
+            overlay_top,
+            overlay_left,
+        )
 
 
 def overlay_segments(
@@ -371,8 +438,7 @@ def auth_overlay_panel(jobs: Iterable[Job], *, error: str | None = None) -> Pane
     body.append("\n")
     body.append(job_names, style=theme_style(TOKYONIGHT["cyan"], bold=True))
     body.append("\n\n")
-    body.append("Password: ", style=theme_style(TOKYONIGHT["cyan"], bold=True))
-    body.append("hidden input active", style=theme_style(TOKYONIGHT["fg"]))
+    body.append("Password:", style=theme_style(TOKYONIGHT["cyan"], bold=True))
     if error:
         body.append("\n")
         body.append(error, style=theme_style(TOKYONIGHT["red"], bold=True))
@@ -388,34 +454,165 @@ def auth_overlay_panel(jobs: Iterable[Job], *, error: str | None = None) -> Pane
 
 
 def dashboard_status_text(subtitle: str, *, dimmed: bool = False) -> Text:
-    return Text(subtitle, style=theme_style(TOKYONIGHT["fg"], dimmed=dimmed))
+    return Text(
+        subtitle,
+        style=theme_style(TOKYONIGHT["fg"], dimmed=dimmed),
+        overflow="ellipsis",
+        no_wrap=True,
+    )
 
 
-def jobs_view(
+def focused_dashboard(
     jobs: list[Job],
     statuses: dict[str, str],
     *,
-    elapsed: dict[str, str] | None = None,
-    exit_codes: dict[str, str] | None = None,
-    output_lines: dict[str, deque[str]] | None = None,
-    frame: int = 0,
-    dimmed: bool = False,
+    elapsed: dict[str, str],
+    exit_codes: dict[str, str],
+    recent_output: Iterable[tuple[str, str]],
+    frame: int,
+    height: int,
+    dimmed: bool,
+) -> Group:
+    counts = status_counts(statuses.values())
+    subtitle = (
+        f"queued {counts['queued']} | running {counts['running']} | "
+        f"ok {counts['succeeded']} | skipped {counts['skipped']} | "
+        f"failed {counts['failed']}"
+    )
+    status = dashboard_status_text(subtitle, dimmed=dimmed)
+    meter = mission_meter(statuses.values(), dimmed=dimmed)
+    if height <= 1:
+        return Group(status)
+    if height == 2:
+        return Group(status, meter)
+
+    ordered_jobs = sorted_jobs(jobs, statuses)
+    job_capacity = max(0, height - 3)
+    omitted = max(0, len(ordered_jobs) - job_capacity)
+    if omitted and job_capacity:
+        visible_jobs = ordered_jobs[: max(0, job_capacity - 1)]
+        omitted = len(ordered_jobs) - len(visible_jobs)
+        used_job_rows = len(visible_jobs) + 1
+    elif omitted:
+        visible_jobs = []
+        omitted = 0
+        used_job_rows = 0
+    else:
+        visible_jobs = ordered_jobs
+        used_job_rows = len(visible_jobs)
+
+    items = [
+        status,
+        meter,
+        focused_jobs_table(
+            visible_jobs,
+            statuses,
+            elapsed=elapsed,
+            exit_codes=exit_codes,
+            frame=frame,
+            omitted=omitted,
+            dimmed=dimmed,
+        ),
+    ]
+    spare_rows = max(0, height - (3 + used_job_rows))
+    output_rows = min(OUTPUT_TAIL_LINES, max(0, spare_rows - 1))
+    recent = list(recent_output)[-output_rows:] if output_rows else []
+    if recent:
+        items.append(output_dock(recent, dimmed=dimmed))
+    return Group(*items)
+
+
+def focused_jobs_table(
+    jobs: list[Job],
+    statuses: dict[str, str],
+    *,
+    elapsed: dict[str, str],
+    exit_codes: dict[str, str],
+    frame: int,
+    omitted: int,
+    dimmed: bool,
+) -> Table:
+    table = Table(
+        box=None,
+        expand=True,
+        padding=(0, 1),
+        collapse_padding=True,
+        header_style=theme_style(TOKYONIGHT["cyan"], bold=True, dimmed=dimmed),
+    )
+    table.add_column("signal", no_wrap=True)
+    table.add_column("phase", width=6, no_wrap=True)
+    table.add_column("job", ratio=1, min_width=8, overflow="ellipsis", no_wrap=True)
+    table.add_column("trajectory", width=12, no_wrap=True)
+    table.add_column("time", justify="right", no_wrap=True)
+    table.add_column("exit", justify="right", no_wrap=True)
+    for job in jobs:
+        status = statuses.get(job.name, "queued")
+        table.add_row(
+            status_label(status, dimmed=dimmed),
+            phase_tag(job.phase, dimmed=dimmed),
+            Text(
+                job.name,
+                style=theme_style(TOKYONIGHT["fg"], bold=True, dimmed=dimmed),
+                overflow="ellipsis",
+                no_wrap=True,
+            ),
+            progress_bar(status, width=12, frame=frame, dimmed=dimmed),
+            Text(
+                elapsed.get(job.name, "-"),
+                style=theme_style(TOKYONIGHT["fg"], dimmed=dimmed),
+            ),
+            Text(
+                exit_codes.get(job.name, "-"),
+                style=theme_style(TOKYONIGHT["fg"], dimmed=dimmed),
+            ),
+        )
+    if omitted:
+        table.add_row(
+            Text("…", style=theme_style(TOKYONIGHT["muted"], dimmed=dimmed)),
+            "",
+            Text(
+                f"… {omitted} jobs hidden",
+                style=theme_style(TOKYONIGHT["muted"], bold=True, dimmed=dimmed),
+                overflow="ellipsis",
+                no_wrap=True,
+            ),
+            "",
+            "",
+            "",
+        )
+    return table
+
+
+def output_dock(
+    recent_output: Iterable[tuple[str, str]], *, dimmed: bool = False
+) -> Group:
+    lines = [
+        Text(
+            "recent output",
+            style=theme_style(TOKYONIGHT["purple"], bold=True, dimmed=dimmed),
+            no_wrap=True,
+        )
+    ]
+    for job_name, output in recent_output:
+        line = Text(no_wrap=True, overflow="ellipsis")
+        line.append(
+            f"{job_name}: ",
+            style=theme_style(TOKYONIGHT["cyan"], bold=True, dimmed=dimmed),
+        )
+        line.append(output, style=theme_style(TOKYONIGHT["fg"], dimmed=dimmed))
+        lines.append(line)
+    return Group(*lines)
+
+
+def planning_jobs_view(
+    jobs: list[Job],
+    statuses: dict[str, str],
 ) -> Group:
     sections = []
     for phase in job_phases(jobs):
         phase_jobs = [job for job in jobs if job.phase == phase]
-        sections.append(phase_heading(phase, dimmed=dimmed))
-        sections.append(
-            jobs_table(
-                phase_jobs,
-                statuses,
-                elapsed=elapsed,
-                exit_codes=exit_codes,
-                output_lines=output_lines,
-                frame=frame,
-                dimmed=dimmed,
-            )
-        )
+        sections.append(phase_heading(phase))
+        sections.append(planning_jobs_table(phase_jobs, statuses))
     return Group(*sections)
 
 
@@ -427,33 +624,24 @@ def job_phases(jobs: list[Job]) -> list[str]:
     return phases
 
 
-def phase_heading(phase: str, *, dimmed: bool = False) -> Rule:
+def phase_heading(phase: str) -> Rule:
     label = PHASE_LABEL.get(phase, phase)
     return Rule(
-        Text(label, style=theme_style(TOKYONIGHT["purple"], bold=True, dimmed=dimmed)),
-        style=theme_style(TOKYONIGHT["muted"], dimmed=dimmed),
+        Text(label, style=theme_style(TOKYONIGHT["purple"], bold=True)),
+        style=TOKYONIGHT["muted"],
     )
 
 
-def jobs_table(
+def planning_jobs_table(
     jobs: list[Job],
     statuses: dict[str, str],
-    *,
-    elapsed: dict[str, str] | None = None,
-    exit_codes: dict[str, str] | None = None,
-    output_lines: dict[str, deque[str]] | None = None,
-    frame: int = 0,
-    dimmed: bool = False,
 ) -> Table:
-    elapsed = elapsed or {}
-    exit_codes = exit_codes or {}
-    output_lines = output_lines or {}
     table = Table(
         box=box.SIMPLE_HEAVY,
         expand=True,
         show_lines=False,
-        header_style=theme_style(TOKYONIGHT["cyan"], bold=True, dimmed=dimmed),
-        border_style=theme_style(TOKYONIGHT["muted"], dimmed=dimmed),
+        header_style=theme_style(TOKYONIGHT["cyan"], bold=True),
+        border_style=TOKYONIGHT["muted"],
     )
     table.add_column("signal", no_wrap=True)
     table.add_column("stage", width=6, no_wrap=True)
@@ -472,19 +660,13 @@ def jobs_table(
     for job in sorted_jobs(jobs, statuses):
         status = statuses.get(job.name, "queued")
         table.add_row(
-            status_label(status, dimmed=dimmed),
-            phase_tag(job.phase, dimmed=dimmed),
-            job_cell(job, dimmed=dimmed),
-            progress_bar(status, width=12, frame=frame, dimmed=dimmed),
-            output_cell(output_lines.get(job.name, ()), dimmed=dimmed),
-            Text(
-                elapsed.get(job.name, "-"),
-                style=theme_style(TOKYONIGHT["fg"], dimmed=dimmed),
-            ),
-            Text(
-                exit_codes.get(job.name, "-"),
-                style=theme_style(TOKYONIGHT["fg"], dimmed=dimmed),
-            ),
+            status_label(status),
+            phase_tag(job.phase),
+            job_cell(job),
+            progress_bar(status, width=12),
+            Text("-", style=TOKYONIGHT["muted"]),
+            Text("-", style=TOKYONIGHT["fg"]),
+            Text("-", style=TOKYONIGHT["fg"]),
         )
     return table
 
@@ -533,31 +715,17 @@ def phase_tag(phase: str, *, dimmed: bool = False) -> Text:
     )
 
 
-def job_cell(job: Job, *, dimmed: bool = False) -> Text:
+def job_cell(job: Job) -> Text:
     cell = Text()
     cell.append(
         job.name,
-        style=theme_style(TOKYONIGHT["fg"], bold=True, dimmed=dimmed),
+        style=theme_style(TOKYONIGHT["fg"], bold=True),
     )
     cell.append("\n")
     cell.append(
         display_command(job.command),
-        style=theme_style(TOKYONIGHT["muted"], dimmed=dimmed),
+        style=TOKYONIGHT["muted"],
     )
-    return cell
-
-
-def output_cell(lines: Iterable[str], *, dimmed: bool = False) -> Text:
-    recent = [line.strip() for line in lines if line.strip()]
-    if not recent:
-        return Text("-", style=theme_style(TOKYONIGHT["muted"], dimmed=dimmed))
-
-    cell = Text()
-    for index, line in enumerate(recent):
-        if index:
-            cell.append("\n")
-        cell.append("› ", style=theme_style(TOKYONIGHT["cyan"], dimmed=dimmed))
-        cell.append(line, style=theme_style(TOKYONIGHT["fg"], dimmed=dimmed))
     return cell
 
 
@@ -643,7 +811,7 @@ def mission_meter(
     complete = counts["succeeded"] + counts["skipped"] + counts["failed"]
     filled = 0 if total == 0 else round(width * complete / total)
     bar = "█" * filled + "░" * (width - filled)
-    text = Text()
+    text = Text(overflow="ellipsis", no_wrap=True)
     text.append("mission burn ", style=theme_style(TOKYONIGHT["muted"], dimmed=dimmed))
     text.append(
         f"{complete}/{total} ",

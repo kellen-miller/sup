@@ -4,13 +4,15 @@ import signal
 import subprocess
 import sys
 import tempfile
+import threading
 import unittest
 from contextlib import redirect_stdout
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from unittest.mock import patch
 
-from rich.console import Console
+from rich.cells import cell_len
+from rich.console import Console, ConsoleDimensions
 
 from sup.cli import (
     INTERRUPTED_EXIT_CODE,
@@ -32,6 +34,7 @@ from sup.display import (
 from sup.jobs import Job, config_path, load_jobs_config, resolve_job_selection
 from sup.logs import cleanup_old_runs, create_run_dir, tail_lines
 from sup.runner import CommandResult, JobResult, Runner
+from tests.terminal_harness import analyze
 
 
 ANSI_STYLE = re.compile(r"\x1b\[[0-9;]*m")
@@ -48,13 +51,31 @@ def strip_ansi_styles(value: str) -> str:
     return ANSI_STYLE.sub("", value)
 
 
-def terminal_console(*, width: int = 120) -> Console:
+def terminal_console(*, width: int = 120, height: int = 25) -> Console:
     return Console(
         file=io.StringIO(),
         force_terminal=True,
         width=width,
+        height=height,
         _environ={},
     )
+
+
+class MutableSizeConsole(Console):
+    def __init__(self, *, width: int, height: int) -> None:
+        self.dimensions = ConsoleDimensions(width, height)
+        super().__init__(
+            file=io.StringIO(),
+            force_terminal=True,
+            _environ={},
+        )
+
+    @property
+    def size(self) -> ConsoleDimensions:
+        return self.dimensions
+
+    def set_size(self, *, width: int, height: int) -> None:
+        self.dimensions = ConsoleDimensions(width, height)
 
 
 class SelectionTest(unittest.TestCase):
@@ -468,6 +489,137 @@ class RunnerTest(unittest.TestCase):
         self.assertEqual(results[0].status, "succeeded")
         self.assertEqual(preflight_jobs, ["mas"])
 
+    def test_parallel_jobs_prepare_on_main_before_worker_execution(self):
+        main_thread = threading.get_ident()
+        events = []
+        event_lock = threading.Lock()
+        command_barrier = threading.Barrier(3)
+
+        def record(event):
+            with event_lock:
+                events.append((event, threading.get_ident()))
+
+        def command_exists(name):
+            record(f"requirement:{name}")
+            return True
+
+        def sudo_preflight(job):
+            record(f"preflight:{job.name}")
+            return True
+
+        def command_runner(job):
+            record(f"command:{job.name}")
+            command_barrier.wait(timeout=2)
+            return CommandResult(exit_code=0)
+
+        jobs = [
+            Job(
+                name=name,
+                label=name.title(),
+                phase="parallel",
+                command=(name,),
+                required_commands=(name,),
+                optional=False,
+                log_name=f"{name}.log",
+                sudo_preflight=name != "plain",
+            )
+            for name in ("first", "plain", "last")
+        ]
+
+        with tempfile.TemporaryDirectory() as tmp:
+            results = Runner(
+                home=Path(tmp),
+                command_exists=command_exists,
+                sudo_preflight=sudo_preflight,
+                command_runner=command_runner,
+            ).run(jobs)
+
+        first_command = next(
+            index
+            for index, (event, _thread) in enumerate(events)
+            if event.startswith("command:")
+        )
+        preparation = events[:first_command]
+        commands = events[first_command:]
+        self.assertEqual(
+            [event for event, _thread in preparation],
+            [
+                "requirement:first",
+                "preflight:first",
+                "requirement:plain",
+                "requirement:last",
+                "preflight:last",
+            ],
+        )
+        self.assertTrue(all(thread == main_thread for _event, thread in preparation))
+        self.assertEqual({thread for _event, thread in commands} & {main_thread}, set())
+        self.assertEqual(len({thread for _event, thread in commands}), 3)
+        self.assertEqual(
+            [result.job.name for result in results], [job.name for job in jobs]
+        )
+
+    def test_parallel_preflight_failure_preserves_result_order(self):
+        jobs = [
+            Job(
+                name=name,
+                label=name.title(),
+                phase="parallel",
+                command=(name,),
+                required_commands=(),
+                optional=name == "blocked",
+                log_name=f"{name}.log",
+                sudo_preflight=name == "blocked",
+            )
+            for name in ("ready-before", "blocked", "ready-after")
+        ]
+
+        with tempfile.TemporaryDirectory() as tmp:
+            results = Runner(
+                home=Path(tmp),
+                sudo_preflight=lambda job: False,
+                command_runner=lambda job: CommandResult(exit_code=0),
+            ).run(jobs)
+
+        self.assertEqual(
+            [(result.job.name, result.status) for result in results],
+            [
+                ("ready-before", "succeeded"),
+                ("blocked", "skipped"),
+                ("ready-after", "succeeded"),
+            ],
+        )
+
+    def test_parallel_elapsed_excludes_serial_preflight_time(self):
+        now = [0.0]
+        job = Job(
+            name="ready",
+            label="Ready",
+            phase="parallel",
+            command=("ready",),
+            required_commands=(),
+            optional=False,
+            log_name="ready.log",
+            sudo_preflight=True,
+        )
+
+        def sudo_preflight(_job):
+            now[0] = 100.0
+            return True
+
+        def command_runner(_job):
+            now[0] = 101.0
+            return CommandResult(exit_code=0)
+
+        with tempfile.TemporaryDirectory() as tmp:
+            with patch("sup.runner.time.monotonic", side_effect=lambda: now[0]):
+                result = Runner(
+                    home=Path(tmp),
+                    sudo_preflight=sudo_preflight,
+                    command_runner=command_runner,
+                ).run([job])[0]
+
+        self.assertEqual(result.elapsed, 1.0)
+
     def test_sudo_preflight_uses_sup_password_prompt(self):
         runner = Runner(home=Path("/tmp/example-home"))
 
@@ -649,18 +801,16 @@ class CliTest(unittest.TestCase):
         )
 
         class FakeDashboard:
-            def show_auth_overlay(self, jobs, *, error=None):
-                events.append(("show", tuple(job.name for job in jobs), error))
+            def read_password(self, jobs, *, error=None, reader=None):
+                events.append(("read", tuple(job.name for job in jobs), error))
+                return reader()
 
-            def clear_auth_overlay(self):
-                events.append(("clear",))
-
-        ticket_checks = iter([False, True])
+        passwords = iter(["wrong", "secret"])
         ok = authenticate_sudo_with_overlay(
             [job],
             dashboard=FakeDashboard(),
-            sudo_ticket_available=lambda: next(ticket_checks),
-            password_reader=lambda: "secret",
+            sudo_ticket_available=lambda: False,
+            password_reader=lambda: next(passwords),
             validator=lambda password: password == "secret",
         )
 
@@ -668,8 +818,12 @@ class CliTest(unittest.TestCase):
         self.assertEqual(
             events,
             [
-                ("show", ("brew-upgrade",), None),
-                ("clear",),
+                ("read", ("brew-upgrade",), None),
+                (
+                    "read",
+                    ("brew-upgrade",),
+                    "Authentication failed. Try again.",
+                ),
             ],
         )
 
@@ -687,13 +841,8 @@ class CliTest(unittest.TestCase):
         ticket_checks = iter([False])
 
         class FakeDashboard:
-            console = Console(file=io.StringIO())
-
-            def show_auth_overlay(self, jobs, *, error=None):
-                pass
-
-            def clear_auth_overlay(self):
-                pass
+            def read_password(self, jobs, *, error=None, reader=None):
+                return reader()
 
         ok = authenticate_sudo_with_overlay(
             [job],
@@ -705,6 +854,64 @@ class CliTest(unittest.TestCase):
         )
 
         self.assertTrue(ok)
+
+    def test_sudo_overlay_treats_end_of_input_as_unavailable(self):
+        job = Job(
+            name="brew-upgrade",
+            label="Homebrew upgrade",
+            phase="core",
+            command=("brew", "upgrade"),
+            required_commands=("brew", "sudo"),
+            optional=False,
+            log_name="brew-upgrade.log",
+            sudo_preflight=True,
+        )
+
+        class FakeDashboard:
+            def read_password(self, jobs, *, error=None, reader=None):
+                raise EOFError
+
+        self.assertFalse(
+            authenticate_sudo_with_overlay(
+                [job],
+                dashboard=FakeDashboard(),
+                sudo_ticket_available=lambda: False,
+            )
+        )
+
+    def test_sudo_overlay_treats_invisible_prompt_as_unavailable(self):
+        job = Job(
+            name="brew-upgrade",
+            label="Homebrew upgrade",
+            phase="core",
+            command=("brew", "upgrade"),
+            required_commands=("brew", "sudo"),
+            optional=False,
+            log_name="brew-upgrade.log",
+            sudo_preflight=True,
+        )
+        dashboard = LiveDashboard(
+            [job],
+            console=terminal_console(width=80, height=6),
+        )
+
+        self.assertFalse(
+            authenticate_sudo_with_overlay(
+                [job],
+                dashboard=dashboard,
+                sudo_ticket_available=lambda: False,
+                validator=lambda _password: self.fail("validator should not run"),
+            )
+        )
+        lines = dashboard.console.render_lines(
+            dashboard.render(),
+            dashboard.console.options,
+            pad=False,
+        )
+        rendered = "\n".join(
+            "".join(segment.text for segment in line) for line in lines
+        )
+        self.assertNotIn("Password:", rendered)
 
     def test_validate_sudo_password_uses_stdin_promptless_sudo(self):
         with patch("sup.cli.subprocess.run") as run:
@@ -748,13 +955,9 @@ class CliTest(unittest.TestCase):
         )
 
         class FakeDashboard:
-            console = Console(file=io.StringIO())
-
-            def show_auth_overlay(self, jobs, *, error=None):
-                events.append(("show", tuple(job.name for job in jobs), error))
-
-            def clear_auth_overlay(self):
-                events.append(("clear",))
+            def read_password(self, jobs, *, error=None, reader=None):
+                events.append(("read", tuple(job.name for job in jobs), error))
+                return reader()
 
         ticket_checks = iter([False, True])
         passwords = iter(["first"])
@@ -771,8 +974,7 @@ class CliTest(unittest.TestCase):
         self.assertEqual(
             events,
             [
-                ("show", ("pnpm",), None),
-                ("clear",),
+                ("read", ("pnpm",), None),
             ],
         )
 
@@ -790,13 +992,9 @@ class CliTest(unittest.TestCase):
         )
 
         class FakeDashboard:
-            console = Console(file=io.StringIO())
-
-            def show_auth_overlay(self, jobs, *, error=None):
-                events.append(("show", tuple(job.name for job in jobs), error))
-
-            def clear_auth_overlay(self):
-                events.append(("clear",))
+            def read_password(self, jobs, *, error=None, reader=None):
+                events.append(("read", tuple(job.name for job in jobs), error))
+                return reader()
 
         ticket_checks = iter([False, False])
         passwords = iter(["first", "second"])
@@ -813,10 +1011,8 @@ class CliTest(unittest.TestCase):
         self.assertEqual(
             events,
             [
-                ("show", ("pnpm",), None),
-                ("clear",),
-                ("show", ("pnpm",), None),
-                ("clear",),
+                ("read", ("pnpm",), None),
+                ("read", ("pnpm",), None),
             ],
         )
 
@@ -872,15 +1068,14 @@ class CliTest(unittest.TestCase):
 
 
 class DisplayTest(unittest.TestCase):
-    def render_dashboard_lines(
-        self,
-        dashboard: LiveDashboard,
-        *,
-        width: int = 160,
-    ) -> list[str]:
-        console = terminal_console(width=width)
-        console.print(dashboard.render())
-        return console.file.getvalue().splitlines()
+    def rendered_height(self, dashboard: LiveDashboard) -> int:
+        console = dashboard.console
+        return len(console.render_lines(dashboard.render(), console.options, pad=False))
+
+    def rendered_text(self, dashboard: LiveDashboard) -> str:
+        console = dashboard.console
+        lines = console.render_lines(dashboard.render(), console.options, pad=False)
+        return "\n".join("".join(segment.text for segment in line) for line in lines)
 
     def test_dry_run_renders_mission_control_theme(self):
         jobs = load_jobs_config(config_path()).jobs[:2]
@@ -921,6 +1116,59 @@ class DisplayTest(unittest.TestCase):
         self.assertNotIn("TOKYONIGHT MISSION CONTROL", output)
         self.assertNotIn("SUP ORBITAL COMMAND", output)
 
+    def test_live_dashboard_budgets_default_jobs_to_viewport_height(self):
+        jobs = load_jobs_config(config_path()).jobs
+
+        for width, height in ((80, 18), (120, 18), (120, 24), (120, 36)):
+            with self.subTest(width=width, height=height):
+                dashboard = LiveDashboard(
+                    jobs,
+                    console=terminal_console(width=width, height=height),
+                )
+
+                self.assertLessEqual(self.rendered_height(dashboard), height)
+
+    def test_live_dashboard_budgets_narrow_viewports(self):
+        jobs = load_jobs_config(config_path()).jobs
+
+        for width, height in (
+            (40, 18),
+            (30, 12),
+            (80, 3),
+            (80, 2),
+            (80, 1),
+        ):
+            with self.subTest(width=width, height=height):
+                dashboard = LiveDashboard(
+                    jobs,
+                    console=terminal_console(width=width, height=height),
+                )
+
+                self.assertLessEqual(self.rendered_height(dashboard), height)
+
+    def test_live_dashboard_rebudgets_after_terminal_resize(self):
+        template = load_jobs_config(config_path()).jobs[0]
+        jobs = [
+            Job(
+                name=f"job-{index:02d}",
+                label=f"Job {index:02d}",
+                phase=template.phase,
+                command=("tool", "update"),
+                required_commands=(),
+                optional=True,
+                log_name=f"job-{index:02d}.log",
+            )
+            for index in range(20)
+        ]
+        console = MutableSizeConsole(width=120, height=24)
+        dashboard = LiveDashboard(jobs, console=console)
+
+        self.assertNotIn("jobs hidden", self.rendered_text(dashboard))
+        console.set_size(width=80, height=18)
+
+        self.assertLessEqual(self.rendered_height(dashboard), 18)
+        self.assertIn("… 6 jobs hidden", self.rendered_text(dashboard))
+
     def test_live_dashboard_sorts_active_jobs_first_within_phase(self):
         jobs = [
             job
@@ -956,10 +1204,13 @@ class DisplayTest(unittest.TestCase):
         dashboard = LiveDashboard(jobs, console=console)
 
         console.print(dashboard.render())
-        output = console.file.getvalue()
+        output = strip_ansi_styles(console.file.getvalue())
 
-        self.assertIn("core phase", output)
-        self.assertIn("parallel phase", output)
+        self.assertIn("[core]", output)
+        self.assertIn("[par]", output)
+        self.assertNotIn("core phase", output)
+        self.assertNotIn("parallel phase", output)
+        self.assertNotIn("brew upgrade", output)
 
     def test_display_command_shortens_long_env_assignments(self):
         command = display_command(
@@ -994,8 +1245,60 @@ class DisplayTest(unittest.TestCase):
         console.print(renderable)
         output = console.file.getvalue()
 
-        self.assertIsNone(renderable.title)
         self.assertNotIn("sup", output)
+        self.assertNotIn("example update", output)
+
+    def test_live_dashboard_prioritizes_state_and_reports_hidden_jobs(self):
+        jobs = load_jobs_config(config_path()).jobs[:7]
+        console = terminal_console(width=120, height=8)
+        dashboard = LiveDashboard(jobs, console=console)
+        statuses = {
+            jobs[0].name: "succeeded",
+            jobs[1].name: "failed",
+            jobs[2].name: "queued",
+            jobs[3].name: "skipped",
+            jobs[4].name: "running",
+            jobs[5].name: "queued",
+            jobs[6].name: "succeeded",
+        }
+        for name, status in statuses.items():
+            dashboard.update(name, status)
+
+        console.print(dashboard.render())
+        lines = [
+            strip_ansi_styles(line) for line in console.file.getvalue().splitlines()
+        ]
+
+        self.assertLess(
+            find_line_index(lines, jobs[4].name), find_line_index(lines, jobs[1].name)
+        )
+        self.assertLess(
+            find_line_index(lines, jobs[1].name), find_line_index(lines, jobs[2].name)
+        )
+        self.assertLess(
+            find_line_index(lines, jobs[2].name), find_line_index(lines, jobs[5].name)
+        )
+        self.assertIn("… 3 jobs hidden", "\n".join(lines))
+        self.assertNotIn(jobs[0].name, "\n".join(lines))
+        self.assertNotIn(jobs[3].name, "\n".join(lines))
+
+    def test_live_dashboard_uses_spare_rows_for_labeled_output_dock(self):
+        jobs = load_jobs_config(config_path()).jobs[:2]
+        console = terminal_console(width=120, height=10)
+        dashboard = LiveDashboard(jobs, console=console)
+
+        dashboard.update(jobs[0].name, "running", output="discarded")
+        dashboard.update(jobs[1].name, "running", output="downloading")
+        dashboard.update(jobs[0].name, "running", output="linking")
+        dashboard.update(jobs[1].name, "running", output="complete")
+        console.print(dashboard.render())
+        output = strip_ansi_styles(console.file.getvalue())
+
+        self.assertIn("recent output", output)
+        self.assertIn(f"{jobs[1].name}: downloading", output)
+        self.assertIn(f"{jobs[0].name}: linking", output)
+        self.assertIn(f"{jobs[1].name}: complete", output)
+        self.assertNotIn("discarded", output)
 
     def test_live_dashboard_renders_sudo_auth_overlay(self):
         jobs = [
@@ -1013,45 +1316,197 @@ class DisplayTest(unittest.TestCase):
         console = terminal_console(width=120)
         dashboard = LiveDashboard(jobs, console=console)
 
-        dashboard.show_auth_overlay(jobs)
-        console.print(dashboard.render())
+        dashboard.read_password(
+            jobs,
+            reader=lambda: console.print(dashboard.render()) or "secret",
+        )
         output = console.file.getvalue()
 
         self.assertIn("sudo authentication required", output)
         self.assertIn("brew-upgrade", output)
         self.assertIn("Password", output)
-        self.assertIn("hidden input active", output)
         self.assertRegex(output, r"\x1b\[[0-9;]*2[0-9;]*m")
+
+    def test_live_dashboard_reads_password_at_rendered_prompt_cell(self):
+        jobs = [
+            Job(
+                name="brew-upgrade",
+                label="Homebrew upgrade",
+                phase="core",
+                command=("brew", "upgrade"),
+                required_commands=("brew", "sudo"),
+                optional=False,
+                log_name="brew-upgrade.log",
+                sudo_preflight=True,
+            )
+        ]
+
+        for width, height in ((80, 18), (120, 24)):
+            with self.subTest(width=width, height=height):
+                console = terminal_console(width=width, height=height)
+                dashboard = LiveDashboard(jobs, console=console)
+                observed = {}
+
+                def reader():
+                    size = console.size
+                    lines = console.render_lines(
+                        dashboard.render(),
+                        console.options.update(width=size.width, height=size.height),
+                        pad=False,
+                    )
+                    observed["lines"] = [
+                        "".join(segment.text for segment in line) for line in lines
+                    ]
+                    observed["controls"] = console.file.getvalue()
+                    return "secret"
+
+                password = dashboard.read_password(jobs, reader=reader)
+
+                prompt_row = next(
+                    index
+                    for index, line in enumerate(observed["lines"])
+                    if "Password:" in line
+                )
+                prompt_line = observed["lines"][prompt_row]
+                expected_column = cell_len(
+                    prompt_line[: prompt_line.index("Password:") + len("Password:")]
+                )
+                moves = re.findall(r"\x1b\[(\d+);(\d+)H", observed["controls"])
+                self.assertEqual(password, "secret")
+                self.assertEqual(
+                    tuple(map(int, moves[-1])),
+                    (prompt_row + 1, expected_column + 1),
+                )
+                self.assertNotIn("Password:", self.rendered_text(dashboard))
+
+    def test_live_dashboard_cleans_up_password_modal_after_reader_error(self):
+        jobs = load_jobs_config(config_path()).jobs[:1]
+        console = terminal_console(width=80, height=18)
+        dashboard = LiveDashboard(jobs, console=console)
+
+        with self.assertRaisesRegex(RuntimeError, "reader failed"):
+            dashboard.read_password(
+                jobs,
+                reader=lambda: (_ for _ in ()).throw(RuntimeError("reader failed")),
+            )
+
+        self.assertNotIn("Password:", self.rendered_text(dashboard))
+        self.assertIn("\x1b[?25h", console.file.getvalue())
+        self.assertTrue(console.file.getvalue().endswith("\x1b[?25l"))
+
+    def test_password_modal_recenters_after_terminal_resize(self):
+        jobs = load_jobs_config(config_path()).jobs[:1]
+        console = MutableSizeConsole(width=120, height=24)
+        dashboard = LiveDashboard(jobs, console=console)
+
+        def observe_prompt_move():
+            expected = None
+
+            def reader():
+                nonlocal expected
+                size = console.size
+                lines = console.render_lines(
+                    dashboard.render(),
+                    console.options.update(width=size.width, height=size.height),
+                    pad=False,
+                )
+                for row, line in enumerate(lines):
+                    text = "".join(segment.text for segment in line)
+                    if "Password:" in text:
+                        column = cell_len(
+                            text[: text.index("Password:") + len("Password:")]
+                        )
+                        expected = (row + 1, column + 1)
+                        break
+                return "secret"
+
+            dashboard.read_password(jobs, reader=reader)
+            moves = re.findall(r"\x1b\[(\d+);(\d+)H", console.file.getvalue())
+            actual = tuple(map(int, moves[-1]))
+            console.file.seek(0)
+            console.file.truncate()
+            return expected, actual
+
+        large_expected, large_actual = observe_prompt_move()
+        console.set_size(width=80, height=18)
+        small_expected, small_actual = observe_prompt_move()
+
+        self.assertEqual(large_actual, large_expected)
+        self.assertEqual(small_actual, small_expected)
+        self.assertNotEqual(small_actual, large_actual)
+
+    def test_password_cursor_ignores_password_text_in_job_name(self):
+        jobs = [
+            Job(
+                name="Password: decoy",
+                label="Decoy",
+                phase="core",
+                command=("decoy",),
+                required_commands=(),
+                optional=True,
+                log_name="decoy.log",
+            ),
+            *load_jobs_config(config_path()).jobs[:12],
+        ]
+        console = terminal_console(width=120, height=18)
+        dashboard = LiveDashboard(jobs, console=console)
+        expected = None
+
+        def reader():
+            nonlocal expected
+            size = console.size
+            lines = console.render_lines(
+                dashboard.render(),
+                console.options.update(width=size.width, height=size.height),
+                pad=False,
+            )
+            occurrences = []
+            for row, line in enumerate(lines):
+                text = "".join(segment.text for segment in line)
+                if "Password:" in text:
+                    column = cell_len(
+                        text[: text.index("Password:") + len("Password:")]
+                    )
+                    occurrences.append((row + 1, column + 1))
+            self.assertEqual(len(occurrences), 2)
+            expected = occurrences[-1]
+            return "secret"
+
+        dashboard.read_password(jobs[1:2], reader=reader)
+        moves = re.findall(r"\x1b\[(\d+);(\d+)H", console.file.getvalue())
+
+        self.assertEqual(tuple(map(int, moves[-1])), expected)
 
     def test_sudo_auth_overlay_does_not_reflow_dashboard(self):
         jobs = load_jobs_config(config_path()).jobs
-        base_dashboard = LiveDashboard(
-            jobs,
-            console=terminal_console(width=160),
-        )
-        overlay_dashboard = LiveDashboard(
-            jobs,
-            console=terminal_console(width=160),
-        )
-        overlay_dashboard.show_auth_overlay([job for job in jobs if job.sudo_preflight])
+        console = terminal_console(width=160, height=25)
+        dashboard = LiveDashboard(jobs, console=console)
+        options = console.options.update(width=160, height=25)
+        base_lines = [
+            "".join(segment.text for segment in line)
+            for line in console.render_lines(dashboard.render(), options, pad=False)
+        ]
+        overlay_lines = []
 
-        base_lines = self.render_dashboard_lines(base_dashboard, width=160)
-        overlay_lines = self.render_dashboard_lines(overlay_dashboard, width=160)
+        def reader():
+            overlay_lines.extend(
+                "".join(segment.text for segment in line)
+                for line in console.render_lines(dashboard.render(), options, pad=False)
+            )
+            return "secret"
 
-        self.assertEqual(len(overlay_lines), len(base_lines))
+        dashboard.read_password(
+            [job for job in jobs if job.sudo_preflight], reader=reader
+        )
+
+        self.assertEqual(len(overlay_lines), 25)
         self.assertEqual(
-            find_line_index(base_lines, "npm"),
-            find_line_index(overlay_lines, "npm"),
+            find_line_index(base_lines, "brew-link-node-tools"),
+            find_line_index(overlay_lines, "brew-link-node-tools"),
         )
-        self.assertEqual(
-            find_line_index(base_lines, "skills"),
-            find_line_index(overlay_lines, "skills"),
-        )
-        prompt_line = strip_ansi_styles(
-            overlay_lines[
-                find_line_index(overlay_lines, "sudo authentication required")
-            ]
-        )
+        prompt_line = overlay_lines[
+            find_line_index(overlay_lines, "sudo authentication required")
+        ]
         prompt_start = prompt_line.index("sudo authentication required")
         self.assertGreater(prompt_start, 45)
         self.assertLess(prompt_start, 90)
@@ -1078,10 +1533,38 @@ class DisplayTest(unittest.TestCase):
         live.assert_called_once_with(
             dashboard,
             console=console,
+            screen=True,
             auto_refresh=False,
-            vertical_overflow="visible",
+            vertical_overflow="crop",
         )
         live.return_value.update.assert_called_once_with(dashboard, refresh=True)
+
+    def test_live_dashboard_restores_terminal_when_entry_is_interrupted(self):
+        jobs = load_jobs_config(config_path()).jobs[:1]
+
+        class InterruptedConsole(Console):
+            def set_alt_screen(self, enable: bool = True):
+                changed = super().set_alt_screen(enable)
+                if enable:
+                    raise KeyboardInterrupt
+                return changed
+
+        console = InterruptedConsole(
+            file=io.StringIO(),
+            force_terminal=True,
+            width=80,
+            height=18,
+            _environ={"TERM": "xterm-256color"},
+        )
+        dashboard = LiveDashboard(jobs, console=console)
+
+        with self.assertRaises(KeyboardInterrupt):
+            dashboard.__enter__()
+
+        output = console.file.getvalue()
+        self.assertEqual(output.count("\x1b[?1049h"), 1)
+        self.assertEqual(output.count("\x1b[?1049l"), 1)
+        self.assertGreater(output.rfind("\x1b[?25h"), output.rfind("\x1b[?25l"))
 
     def test_live_dashboard_throttles_output_refreshes(self):
         jobs = [
@@ -1149,6 +1632,19 @@ class DisplayTest(unittest.TestCase):
         self.assertIn("✅", output)
         self.assertIn("succeeded", output)
         self.assertIn("rustup", output)
+
+
+class TerminalHarnessTest(unittest.TestCase):
+    def test_missing_password_prompt_does_not_match_missing_cursor_move(self):
+        result = analyze(
+            b"",
+            scenario="password",
+            width=80,
+            height=6,
+            echo_disabled=False,
+        )
+
+        self.assertFalse(result["password_cursor_matches_prompt"])
 
 
 if __name__ == "__main__":
