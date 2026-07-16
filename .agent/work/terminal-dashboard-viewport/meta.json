@@ -1,0 +1,21 @@
+{
+  "id": "terminal-dashboard-viewport",
+  "title": "Bound the live terminal dashboard",
+  "stage": "plan",
+  "state": "completed",
+  "created_at": "2026-07-15T22:58:03Z",
+  "updated_at": "2026-07-16T00:29:41Z",
+  "worktree": "/Users/kellen/development/github/kellen-miller/sup/.worktrees/fix-interactive-terminal",
+  "branch": "codex/fix-interactive-terminal",
+  "base_ref": "main",
+  "base_commit": "2a4310f4f50ab30bef085102189e720f439104e1",
+  "upstream": null,
+  "artifacts": {
+    "plans": "../../PLANS.md",
+    "decision": "decision.md",
+    "execplan": "execplan.md",
+    "adversarial_review": "adversarial/plan-review.md",
+    "adversarial_resolution": "adversarial/plan-review-resolution.md",
+    "adversarial_rereview_attempt": "adversarial/plan-rereview-attempt.md"
+  }
+}
