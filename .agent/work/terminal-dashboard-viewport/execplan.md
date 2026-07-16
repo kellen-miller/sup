@@ -43,15 +43,22 @@ presentation, and `SudoAuthenticator` remains ignorant of terminal coordinates.
   strategy with the user.
 - [x] (2026-07-15 22:58Z) Created the decision record, metadata, repository
   `PLANS.md`, and initial ExecPlan in the isolated worktree.
-- [ ] Add failing viewport, redraw, selection, and password-input tests.
-- [ ] Implement a bounded focused dashboard behind `LiveDashboard`.
-- [ ] Move hidden password positioning into the display module while retaining
-  sudo policy in `SudoAuthenticator`.
-- [ ] Prepare parallel jobs and perform their sudo preflights on the main thread
-  before submitting commands to worker threads.
-- [ ] Add and run the harmless pseudo-terminal harness.
-- [ ] Run required validation and review the implementation against this plan
-  and `decision.md`.
+- [x] (2026-07-16 02:07Z) Added viewport, resize, semantic selection, output
+  dock, password-coordinate, cleanup, runner-thread, and EOF behavior tests;
+  the full suite now contains 63 test methods.
+- [x] (2026-07-16 02:07Z) Implemented the compact focused dashboard in Rich's
+  alternate screen with height-aware job selection and a global output dock.
+- [x] (2026-07-16 02:07Z) Moved modal rendering, absolute cursor placement,
+  hidden input, and cleanup into `LiveDashboard.read_password`; retained sudo
+  ticket, retry, and validation policy in `SudoAuthenticator`.
+- [x] (2026-07-16 01:52Z) Split runner preparation from execution; the entire
+  parallel batch now completes requirement checks and sudo preflights on the
+  main thread before ready commands are submitted to workers.
+- [x] (2026-07-16 02:07Z) Added and ran the synthetic PTY harness for password
+  input at 80x18 and 120x24 and signal cleanup at 80x18.
+- [ ] Run required validation and all three reviews against this plan and
+  `decision.md`. Validation and the recent-work review are complete; formal and
+  adversarial review remain.
 
 ## Surprises & Discoveries
 
@@ -81,6 +88,28 @@ presentation, and `SudoAuthenticator` remains ignorant of terminal coordinates.
 - Observation: the existing sudo keepalive was intentionally removed by commit
   `78f8934` in favor of event-based preflight checks. This work keeps that
   behavior and does not reintroduce a timer or retain password material.
+- Observation: the runner tracer initially observed the first parallel command
+  starting after only the first job's requirement check and sudo preflight;
+  the remaining jobs had not begun preparation.
+  Evidence: `test_parallel_jobs_prepare_on_main_before_worker_execution` failed
+  with only `requirement:first` and `preflight:first` before the first command.
+- Observation: after splitting preparation and execution, all 16 runner tests
+  pass. Three prepared commands rendezvous concurrently on three worker thread
+  identifiers while all requirement and preflight callbacks use the main
+  thread, and a skipped preflight result remains in configured order.
+  Evidence: `uv run python -m unittest tests.test_sup.RunnerTest`.
+- Observation: the 13 configured jobs render in 16 pre-crop rows at widths 80
+  and 120, leaving the Rich screen crop as a fallback instead of the layout
+  mechanism. A 20-job test resizes from 120x24 to 80x18 and reports exactly six
+  hidden jobs without rebuilding the dashboard.
+  Evidence: `DisplayTest` viewport and mutable-size tests.
+- Observation: a signal sent as soon as alternate-screen entry appears can
+  interrupt Rich inside `Live.__enter__`, before Python can invoke the context's
+  exit path. That is not representative of interrupting a running dashboard.
+  Evidence: the first harness signal attempt entered the alternate screen but
+  had no paired exit. The harness now emits an invisible ready control from
+  inside the active context; SIGINT and SIGTERM then both pair screen and cursor
+  controls and place the final marker after screen exit.
 
 ## Decision Log
 
@@ -116,9 +145,12 @@ presentation, and `SudoAuthenticator` remains ignorant of terminal coordinates.
 
 ## Outcomes & Retrospective
 
-Planning is complete. Implementation and its observable terminal evidence are
-not yet complete. Update this section after each milestone and at final
-acceptance.
+Implementation and behavioral validation are complete. The dashboard uses a
+bounded focused alternate screen, password entry lands on the modal's rendered
+prompt cell with real PTY echo suppression, and runner preparation guarantees
+that prompting stays on the main thread before worker execution. A fresh-eyes
+recent-work pass found no correctness, scope, or simplicity-boundary defect;
+formal and adversarial reviews remain before final completion.
 
 ## Context and Orientation
 
@@ -421,6 +453,14 @@ Run the harmless terminal harness at both acceptance sizes:
 Each harness run must produce one JSON object with successful boolean fields and
 exit zero using the schema in Milestone 4. Record the actual transcripts here
 after the harness exists.
+
+Actual harness evidence (2026-07-16), abbreviated to the dimension, scenario,
+and non-obvious control assertions; every other schema boolean was also true:
+
+    password 80x18: cursor_match=true echo_suppressed=true cursor_up_rows=0
+    password 120x24: cursor_match=true echo_suppressed=true cursor_up_rows=0
+    sigint 80x18: screen_exit_before_final=true cursor_controls_paired=true
+    sigterm 80x18: screen_exit_before_final=true cursor_controls_paired=true
 
 Run the repository-required validation commands:
 

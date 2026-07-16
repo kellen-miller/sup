@@ -4,7 +4,6 @@ import argparse
 import signal
 import subprocess
 import sys
-import threading
 from collections.abc import Callable, Iterable
 from pathlib import Path
 
@@ -129,21 +128,19 @@ class SudoAuthenticator:
         self.password_reader = password_reader
         self.validator = validator
         self.max_attempts = max_attempts
-        self._lock = threading.Lock()
 
     def authenticate(self, job: Job | None = None) -> bool:
         if not self.jobs:
             return True
         jobs = (job,) if job is not None else self.jobs
-        with self._lock:
-            return authenticate_sudo_with_overlay(
-                jobs,
-                dashboard=self.dashboard,
-                sudo_ticket_available=self.sudo_ticket_available,
-                password_reader=self.password_reader,
-                validator=self.validator,
-                max_attempts=self.max_attempts,
-            )
+        return authenticate_sudo_with_overlay(
+            jobs,
+            dashboard=self.dashboard,
+            sudo_ticket_available=self.sudo_ticket_available,
+            password_reader=self.password_reader,
+            validator=self.validator,
+            max_attempts=self.max_attempts,
+        )
 
 
 def authenticate_sudo_with_overlay(
@@ -163,20 +160,21 @@ def authenticate_sudo_with_overlay(
     if sudo_ticket_available():
         return True
 
-    password_reader = password_reader or (
-        lambda: dashboard.console.input("", password=True)
-    )
     validator = validator or validate_sudo_password
     error: str | None = None
     for _ in range(max_attempts):
-        dashboard.show_auth_overlay(jobs, error=error)
-        password = password_reader()
+        try:
+            password = dashboard.read_password(
+                jobs,
+                error=error,
+                reader=password_reader,
+            )
+        except EOFError:
+            return False
         if validator(password):
-            dashboard.clear_auth_overlay()
             return True
         error = "Authentication failed. Try again."
 
-    dashboard.clear_auth_overlay()
     return False
 
 

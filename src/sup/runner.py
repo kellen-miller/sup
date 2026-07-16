@@ -29,6 +29,13 @@ class JobResult:
     reason: str = ""
 
 
+@dataclass(frozen=True)
+class _PreparedJob:
+    job: Job
+    log_path: Path
+    started: float
+
+
 CommandRunner = Callable[[Job], CommandResult]
 CommandExists = Callable[[str], bool]
 PathExists = Callable[[Path], bool]
@@ -96,22 +103,34 @@ class Runner:
         results: list[JobResult] = []
         try:
             for job in [job for job in jobs if job.phase == "core"]:
-                results.append(self._run_one(job, run_dir, on_update=on_update))
+                prepared = self._prepare(job, run_dir, on_update=on_update)
+                results.append(
+                    prepared
+                    if isinstance(prepared, JobResult)
+                    else self._execute(prepared, on_update=on_update)
+                )
 
             parallel_jobs = [job for job in jobs if job.phase == "parallel"]
-            parallel_results: list[JobResult] = []
-            if parallel_jobs:
-                executor = ThreadPoolExecutor(max_workers=len(parallel_jobs))
+            parallel_results: dict[int, JobResult] = {}
+            prepared_jobs: list[tuple[int, _PreparedJob]] = []
+            for index, job in enumerate(parallel_jobs):
+                prepared = self._prepare(job, run_dir, on_update=on_update)
+                if isinstance(prepared, JobResult):
+                    parallel_results[index] = prepared
+                else:
+                    prepared_jobs.append((index, prepared))
+
+            if prepared_jobs:
+                executor = ThreadPoolExecutor(max_workers=len(prepared_jobs))
                 wait_for_executor = True
                 futures = {}
                 try:
                     futures = {
-                        executor.submit(self._run_one, job, run_dir, on_update): job
-                        for job in parallel_jobs
+                        executor.submit(self._execute, prepared, on_update): index
+                        for index, prepared in prepared_jobs
                     }
-                    parallel_results = [
-                        future.result() for future in as_completed(futures)
-                    ]
+                    for future in as_completed(futures):
+                        parallel_results[futures[future]] = future.result()
                 except KeyboardInterrupt:
                     wait_for_executor = False
                     for future in futures:
@@ -125,14 +144,7 @@ class Runner:
         except KeyboardInterrupt:
             self.stop()
             raise
-        results.extend(
-            sorted(
-                parallel_results,
-                key=lambda result: [job.name for job in parallel_jobs].index(
-                    result.job.name
-                ),
-            )
-        )
+        results.extend(parallel_results[index] for index in range(len(parallel_jobs)))
         return results
 
     @staticmethod
@@ -148,12 +160,12 @@ class Runner:
             reason="dry run",
         )
 
-    def _run_one(
+    def _prepare(
         self,
         job: Job,
         run_dir: Path,
         on_update: StatusCallback | None = None,
-    ) -> JobResult:
+    ) -> _PreparedJob | JobResult:
         started = time.monotonic()
         missing = self._missing_requirements(job)
         log_path = run_dir / job.log_name
@@ -181,19 +193,27 @@ class Runner:
             self._emit(on_update, job.name, status, result)
             return result
 
+        return _PreparedJob(job=job, log_path=log_path, started=started)
+
+    def _execute(
+        self,
+        prepared: _PreparedJob,
+        on_update: StatusCallback | None = None,
+    ) -> JobResult:
+        job = prepared.job
         self._emit(on_update, job.name, "running", None)
         command_result = (
             self.command_runner(job)
             if self.command_runner is not None
-            else self._run_subprocess(job, log_path, on_update=on_update)
+            else self._run_subprocess(job, prepared.log_path, on_update=on_update)
         )
         status = "succeeded" if command_result.exit_code == 0 else "failed"
         result = JobResult(
             job,
             status,
             command_result.exit_code,
-            time.monotonic() - started,
-            log_path,
+            time.monotonic() - prepared.started,
+            prepared.log_path,
         )
         self._emit(on_update, job.name, status, result)
         return result
