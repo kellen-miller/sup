@@ -1098,6 +1098,9 @@ class DisplayTest(unittest.TestCase):
         dashboard = LiveDashboard(jobs, console=console)
 
         dashboard.update("rustup", "running", output="older preface")
+        for event in range(2, 9):
+            dashboard.update("rustup", "running", output=f"progress {event}")
+
         dashboard.update("rustup", "running", output="syncing channel")
         dashboard.update("rustup", "running", output="downloading rustc")
         dashboard.update("rustup", "running", output="installing rustc")
@@ -1287,18 +1290,52 @@ class DisplayTest(unittest.TestCase):
         console = terminal_console(width=120, height=10)
         dashboard = LiveDashboard(jobs, console=console)
 
-        dashboard.update(jobs[0].name, "running", output="discarded")
-        dashboard.update(jobs[1].name, "running", output="downloading")
-        dashboard.update(jobs[0].name, "running", output="linking")
-        dashboard.update(jobs[1].name, "running", output="complete")
+        for event in range(1, 12):
+            job = jobs[(event - 1) % len(jobs)]
+            dashboard.update(
+                job.name,
+                "running",
+                output=f"telemetry[{event:02d}]",
+            )
+
         console.print(dashboard.render())
-        output = strip_ansi_styles(console.file.getvalue())
+        lines = [
+            strip_ansi_styles(line) for line in console.file.getvalue().splitlines()
+        ]
+        output = "\n".join(lines)
 
         self.assertIn("recent output", output)
-        self.assertIn(f"{jobs[1].name}: downloading", output)
-        self.assertIn(f"{jobs[0].name}: linking", output)
-        self.assertIn(f"{jobs[1].name}: complete", output)
-        self.assertNotIn("discarded", output)
+        self.assertLessEqual(self.rendered_height(dashboard), 10)
+        self.assertNotIn("telemetry[07]", output)
+        positions = [
+            find_line_index(lines, f"telemetry[{event:02d}]") for event in range(8, 12)
+        ]
+        self.assertEqual(positions, sorted(positions))
+
+    def test_live_dashboard_renders_ten_global_output_events_in_order(self):
+        jobs = load_jobs_config(config_path()).jobs[:2]
+        console = terminal_console(width=120, height=16)
+        dashboard = LiveDashboard(jobs, console=console)
+
+        for event in range(1, 12):
+            job = jobs[(event - 1) % len(jobs)]
+            dashboard.update(
+                job.name,
+                "running",
+                output=f"telemetry[{event:02d}]",
+            )
+
+        console.print(dashboard.render())
+        lines = [
+            strip_ansi_styles(line) for line in console.file.getvalue().splitlines()
+        ]
+        output = "\n".join(lines)
+
+        self.assertNotIn("telemetry[01]", output)
+        positions = [
+            find_line_index(lines, f"telemetry[{event:02d}]") for event in range(2, 12)
+        ]
+        self.assertEqual(positions, sorted(positions))
 
     def test_live_dashboard_renders_sudo_auth_overlay(self):
         jobs = [
