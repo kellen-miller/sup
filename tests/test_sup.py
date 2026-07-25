@@ -406,27 +406,46 @@ class RunnerTest(unittest.TestCase):
         results = runner.run(jobs, dry_run=False)
 
         self.assertEqual(results[0].status, "skipped")
-        self.assertIn(".agents/skills/update.py", results[0].reason)
+        self.assertIn(".agents/skills/pyproject.toml", results[0].reason)
 
-    def test_skills_job_uses_agents_update_script(self):
+    def test_skills_job_uses_locked_skillctl_project(self):
         with tempfile.TemporaryDirectory() as tmp:
             home = Path(tmp)
-            updater = home / ".agents" / "skills" / "update.py"
+            project = home / ".agents" / "skills"
             jobs = [
                 job
                 for job in load_jobs_config(config_path(), home=home).jobs
                 if job.name == "skills"
             ]
 
-        self.assertEqual(jobs[0].command, ("python3", str(updater)))
-        self.assertEqual(jobs[0].required_commands, ("python3",))
-        self.assertEqual(jobs[0].required_paths, (updater,))
+        self.assertEqual(
+            jobs[0].command,
+            (
+                "uv",
+                "run",
+                "--project",
+                str(project),
+                "--locked",
+                "skillctl",
+                "sync",
+            ),
+        )
+        self.assertEqual(jobs[0].required_commands, ("uv",))
+        self.assertEqual(
+            jobs[0].required_paths,
+            (
+                project / "pyproject.toml",
+                project / "uv.lock",
+                project / "deps.yaml",
+            ),
+        )
         self.assertEqual(jobs[0].required_env, ())
 
-    def test_present_skills_updater_allows_optional_job_to_run(self):
+    def test_present_skills_project_allows_optional_job_to_run(self):
         calls = []
         with tempfile.TemporaryDirectory() as tmp:
             home = Path(tmp)
+            project = home / ".agents" / "skills"
             jobs = [
                 job
                 for job in load_jobs_config(config_path(), home=home).jobs
@@ -446,7 +465,17 @@ class RunnerTest(unittest.TestCase):
         self.assertEqual(results[0].status, "succeeded")
         self.assertEqual(
             calls,
-            [("python3", str(home / ".agents" / "skills" / "update.py"))],
+            [
+                (
+                    "uv",
+                    "run",
+                    "--project",
+                    str(project),
+                    "--locked",
+                    "skillctl",
+                    "sync",
+                )
+            ],
         )
 
     def test_sudo_preflight_failure_skips_optional_mas_command(self):

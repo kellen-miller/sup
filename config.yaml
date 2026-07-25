@@ -127,8 +127,18 @@ jobs:
   - name: skills
     label: Agent skills
     phase: parallel
-    command: ["python3", "$HOME/.agents/skills/update.py"]
-    required_commands: ["python3"]
-    required_paths: ["$HOME/.agents/skills/update.py"]
+    command:
+      - uv
+      - run
+      - --project
+      - $HOME/.agents/skills
+      - --locked
+      - skillctl
+      - sync
+    required_commands: ["uv"]
+    required_paths:
+      - $HOME/.agents/skills/pyproject.toml
+      - $HOME/.agents/skills/uv.lock
+      - $HOME/.agents/skills/deps.yaml
     optional: true
     log_name: skills.log

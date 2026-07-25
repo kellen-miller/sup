@@ -68,14 +68,21 @@ Supported job keys:
 are expanded when the config is loaded. Missing required environment variables
 cause optional jobs to be skipped before execution.
 
-The default `skills` job runs the user agent-skill updater when it exists:
+The default `skills` job runs the public agent-skills project's locked
+`skillctl` environment when the checkout is installed:
 
 ```bash
 uv run --project . sup --only skills
 ```
 
-It calls `python3 $HOME/.agents/skills/update.py`. If that updater is missing,
-the optional `skills` job is skipped.
+It calls:
+
+```bash
+uv run --project "$HOME/.agents/skills" --locked skillctl sync
+```
+
+If `uv` or the skills project's `pyproject.toml`, `uv.lock`, or `deps.yaml` is
+missing, the optional `skills` job is skipped.
 
 ## Logs
 
