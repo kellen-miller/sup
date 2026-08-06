@@ -421,6 +421,9 @@ class RunnerTest(unittest.TestCase):
         self.assertEqual(
             jobs[0].command,
             (
+                "env",
+                "-u",
+                "VIRTUAL_ENV",
                 "uv",
                 "run",
                 "--project",
@@ -467,6 +470,9 @@ class RunnerTest(unittest.TestCase):
             calls,
             [
                 (
+                    "env",
+                    "-u",
+                    "VIRTUAL_ENV",
                     "uv",
                     "run",
                     "--project",

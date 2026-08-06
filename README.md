@@ -75,10 +75,10 @@ The default `skills` job runs the public agent-skills project's locked
 uv run --project . sup --only skills
 ```
 
-It calls:
+It clears any inherited virtual environment, then calls:
 
 ```bash
-uv run --project "$HOME/.agents/skills" --locked skillctl sync
+env -u VIRTUAL_ENV uv run --project "$HOME/.agents/skills" --locked skillctl sync
 ```
 
 If `uv` or the skills project's `pyproject.toml`, `uv.lock`, or `deps.yaml` is
