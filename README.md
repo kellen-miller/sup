@@ -84,6 +84,16 @@ env -u VIRTUAL_ENV uv run --project "$HOME/.agents/skills" --locked skillctl syn
 If `uv` or the skills project's `pyproject.toml`, `uv.lock`, or `deps.yaml` is
 missing, the optional `skills` job is skipped.
 
+The Node job closes pnpm's stdin so global updates cannot open build-approval
+prompts while output is captured. Existing build approvals still apply;
+unreviewed scripts stay disabled and are reported by pnpm. Approve required
+scripts separately with `pnpm approve-builds --global`.
+
+The Mac App Store job uses `mas upgrade --accurate --no-check-min-os --verbose`.
+It checks App Store download metadata, avoiding false negatives from missing
+or stale catalog entries. The App Store handles OS compatibility and may show
+dialogs for incompatible apps or account issues.
+
 ## Logs
 
 Each real run writes logs under:

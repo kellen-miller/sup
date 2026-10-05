@@ -171,6 +171,10 @@ class SelectionTest(unittest.TestCase):
 
         self.assertTrue(mas.sudo_preflight)
         self.assertIn("sudo", mas.required_commands)
+        self.assertEqual(
+            mas.command,
+            ("mas", "upgrade", "--accurate", "--no-check-min-os", "--verbose"),
+        )
 
     def test_node_package_managers_update_in_order_without_sudo(self):
         jobs_config = load_jobs_config(config_path())
@@ -185,7 +189,7 @@ class SelectionTest(unittest.TestCase):
                 "-c",
                 "npm update --global && "
                 "corepack install --global pnpm@latest && "
-                "pnpm update --global",
+                "pnpm update --global </dev/null",
             ),
         )
         self.assertEqual(job.required_commands, ("sh", "npm", "corepack", "pnpm"))
