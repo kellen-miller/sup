@@ -15,6 +15,7 @@ uv run --project . sup --dry-run
 uv run python -m unittest discover -s tests
 uvx ruff format .
 uvx ruff check .
+uv run --locked yamllint --strict .
 uv build
 ```
 
@@ -23,6 +24,7 @@ Before claiming work is complete, run:
 ```bash
 uvx ruff format --check .
 uvx ruff check .
+uv run --locked yamllint --strict .
 uv run python -m unittest discover -s tests
 uv run python -m py_compile src/sup/*.py tests/test_sup.py
 git diff --check
@@ -46,5 +48,5 @@ The default config file is `config.yaml`. Keep jobs data-driven and portable:
 
 ## CI
 
-Pull requests run `.github/workflows/ruff.yml`, which checks Ruff formatting and
-linting. Keep local Ruff output clean before pushing.
+Pull requests run `.github/workflows/ruff.yml`, which checks Ruff formatting,
+Python linting, and yamllint. Keep local lint output clean before pushing.

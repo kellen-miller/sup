@@ -43,8 +43,11 @@ jobs:
   - name: rustup
     label: Rust toolchain
     phase: parallel
-    command: ["rustup", "update"]
-    required_commands: ["rustup"]
+    command:
+      - rustup
+      - update
+    required_commands:
+      - rustup
     optional: true
     log_name: rustup.log
 ```
@@ -112,7 +115,10 @@ to disable cleanup for a run.
 uv run python -m unittest discover -s tests
 uvx ruff format --check .
 uvx ruff check .
+uv run --locked yamllint --strict .
 uv build
 ```
 
-The GitHub Actions workflow runs Ruff formatting and linting on pull requests.
+The GitHub Actions workflow runs Ruff formatting, Python linting, and yamllint
+on pull requests. YAML rules match homeserver: two-space indentation, block
+collections, and no line-length limit.
