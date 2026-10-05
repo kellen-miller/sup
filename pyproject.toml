@@ -12,6 +12,9 @@ dependencies = [
 [project.scripts]
 sup = "sup.cli:main"
 
+[dependency-groups]
+dev = ["yamllint==1.38.0"]
+
 [build-system]
 requires = ["hatchling"]
 build-backend = "hatchling.build"
