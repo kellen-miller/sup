@@ -91,7 +91,7 @@ jobs:
   - name: mas
     label: Mac App Store
     phase: parallel
-    command: ["mas", "upgrade"]
+    command: ["mas", "upgrade", "--accurate", "--no-check-min-os", "--verbose"]
     required_commands: ["mas", "sudo"]
     optional: true
     log_name: mas.log
@@ -103,7 +103,7 @@ jobs:
     command:
       - sh
       - -c
-      - npm update --global && corepack install --global pnpm@latest && pnpm update --global
+      - npm update --global && corepack install --global pnpm@latest && pnpm update --global </dev/null
     required_commands: ["sh", "npm", "corepack", "pnpm"]
     optional: true
     log_name: node-package-managers.log
