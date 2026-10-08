@@ -3,24 +3,13 @@ name: Lint
 on:
   pull_request:
 
+permissions:
+  contents: read
+
 jobs:
   ruff:
     name: Format and lint
-    runs-on: ubuntu-latest
-
-    steps:
-      - name: Check out repository
-        uses: actions/checkout@v4
-
-      - name: Check formatting
-        uses: astral-sh/ruff-action@v3
-        with:
-          args: format --check .
-
-      - name: Lint
-        uses: astral-sh/ruff-action@v3
-        with:
-          args: check .
+    uses: kellen-miller/ci/.github/workflows/python-lint.yaml@d1c91763535a5866b55282018f301d921b22bcd5
 
   yamllint:
     name: YAML lint
@@ -28,7 +17,9 @@ jobs:
 
     steps:
       - name: Check out repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
 
       - name: Install uv
         uses: astral-sh/setup-uv@bec219d24cd3e171d82865faccec33120bb574f4 # v10.1.0
