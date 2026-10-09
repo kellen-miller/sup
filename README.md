@@ -92,6 +92,12 @@ prompts while output is captured. Existing build approvals still apply;
 unreviewed scripts stay disabled and are reported by pnpm. Approve required
 scripts separately with `pnpm approve-builds --global`.
 
+The Go tools job runs `env -u GOROOT gup update`. This removes an inherited
+`GOROOT` that may point at a deleted Homebrew version after the core upgrade
+phase. Go resolves its installation from the executable selected by `PATH`;
+`GOPATH`, `GOBIN`, and the parent shell environment stay unchanged. Custom
+configs that require an explicit `GOROOT` can use `gup update` directly.
+
 The Mac App Store job uses `mas upgrade --accurate --no-check-min-os --verbose`.
 It checks App Store download metadata, avoiding false negatives from missing
 or stale catalog entries. The App Store handles OS compatibility and may show

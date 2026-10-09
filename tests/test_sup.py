@@ -1,4 +1,5 @@
 import io
+import os
 import re
 import signal
 import subprocess
@@ -712,6 +713,39 @@ class RunnerTest(unittest.TestCase):
         )
 
         self.assertEqual(events, [("rustup", "running"), ("rustup", "succeeded")])
+
+    def test_gup_drops_stale_goroot_and_preserves_gopath(self):
+        job = next(
+            job for job in load_jobs_config(config_path()).jobs if job.name == "gup"
+        )
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            gup = root / "gup"
+            gup.write_text(
+                "#!/bin/sh\n"
+                'test "$1" = update || exit 1\n'
+                'test "${GOROOT+x}" != x || exit 2\n'
+                'printf \'%s\\n\' "$GOPATH" "$GOBIN"\n',
+                encoding="utf-8",
+            )
+            gup.chmod(0o755)
+            environment = {
+                "PATH": f"{root}{os.pathsep}{os.environ.get('PATH', os.defpath)}",
+                "GOROOT": str(root / "deleted-go" / "libexec"),
+                "GOPATH": str(root / "workspace"),
+                "GOBIN": str(root / "bin"),
+            }
+
+            with patch.dict(os.environ, environment):
+                results = Runner(home=root).run([job])
+                self.assertEqual(os.environ["GOROOT"], environment["GOROOT"])
+
+            self.assertEqual(results[0].status, "succeeded")
+            self.assertEqual(
+                results[0].log_path.read_text(encoding="utf-8").splitlines(),
+                [environment["GOPATH"], environment["GOBIN"]],
+            )
 
     def test_runner_emits_subprocess_output_updates(self):
         events = []
