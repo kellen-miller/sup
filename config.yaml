@@ -100,9 +100,13 @@ jobs:
     label: Go tools
     phase: parallel
     command:
+      - 'env'
+      - '-u'
+      - 'GOROOT'
       - 'gup'
       - 'update'
     required_commands:
+      - 'env'
       - 'gup'
     optional: true
     log_name: gup.log
