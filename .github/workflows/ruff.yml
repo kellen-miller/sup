@@ -11,11 +11,55 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  changes:
+    runs-on: ubuntu-latest
+    outputs:
+      changes: ${{ steps.paths.outputs.changes }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+      - id: paths
+        uses: kellen-miller/ci/.github/actions/changed-paths@75c70f9d5db7117810669e0af01fd2eafdc396c6
+        with:
+          filters: |
+            {
+              "python": [
+                ".github/workflows/ruff.yml",
+                ".github/actions/**",
+                "pyproject.toml",
+                "uv.lock",
+                ".python-version",
+                ".tool-versions",
+                "**/*.py",
+                "ruff.toml",
+                ".ruff.toml"
+              ],
+              "yaml": [
+                ".github/workflows/ruff.yml",
+                ".github/actions/**",
+                "pyproject.toml",
+                "uv.lock",
+                ".python-version",
+                ".tool-versions",
+                "**/*.yaml",
+                "**/*.yml",
+                ".yamllint",
+                ".yamllint.yaml",
+                ".yamllint.yml"
+              ]
+            }
+
   ruff:
+    needs: changes
+    if: ${{ !cancelled() && (needs.changes.result != 'success' || fromJSON(needs.changes.outputs.changes).python) }}
     name: Format and lint
     uses: kellen-miller/ci/.github/workflows/python-lint.yaml@d1c91763535a5866b55282018f301d921b22bcd5
 
   yamllint:
+    needs: changes
+    if: ${{ !cancelled() && (needs.changes.result != 'success' || fromJSON(needs.changes.outputs.changes).yaml) }}
     name: YAML lint
     runs-on: ubuntu-latest
 
