@@ -8,6 +8,6 @@ concurrency:
   cancel-in-progress: true
 jobs:
   workflows:
-    uses: kellen-miller/ci/.github/workflows/gh-actions-lint.yaml@f01aacda5b78c7b67d1dc840bd0432be852a69a4
+    uses: kellen-miller/ci/.github/workflows/gh-actions-lint.yaml@9123b953c185a9f2550d88ed89e86dd37d482249
   renovate:
     uses: kellen-miller/ci/.github/workflows/renovate-config-validator.yaml@730a37faa538048765e3cbb2e9b1454cfc4eb722
