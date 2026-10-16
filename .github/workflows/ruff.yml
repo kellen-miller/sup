@@ -21,7 +21,7 @@ jobs:
           persist-credentials: false
           fetch-depth: 0
       - id: paths
-        uses: kellen-miller/ci/.github/actions/changed-paths@9123b953c185a9f2550d88ed89e86dd37d482249
+        uses: kellen-miller/ci/.github/actions/changed-paths@6fe04bbd1d1e1fc4c4e7f06682803b91336a4a2f
         with:
           filters: |
             {
