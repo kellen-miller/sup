@@ -11,11 +11,46 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  changes:
+    uses: kellen-miller/ci/.github/workflows/changed-paths.yaml@f01aacda5b78c7b67d1dc840bd0432be852a69a4
+    with:
+      filters: |
+        {
+          "python": [
+            ".github/workflows/ruff.yml",
+            ".github/actions/**",
+            "pyproject.toml",
+            "uv.lock",
+            ".python-version",
+            ".tool-versions",
+            "**/*.py",
+            "ruff.toml",
+            ".ruff.toml"
+          ],
+          "yaml": [
+            ".github/workflows/ruff.yml",
+            ".github/actions/**",
+            "pyproject.toml",
+            "uv.lock",
+            ".python-version",
+            ".tool-versions",
+            "**/*.yaml",
+            "**/*.yml",
+            ".yamllint",
+            ".yamllint.yaml",
+            ".yamllint.yml"
+          ]
+        }
+
   ruff:
+    needs: changes
+    if: ${{ !cancelled() && (needs.changes.result != 'success' || fromJSON(needs.changes.outputs.changes).python) }}
     name: Format and lint
     uses: kellen-miller/ci/.github/workflows/python-lint.yaml@d1c91763535a5866b55282018f301d921b22bcd5
 
   yamllint:
+    needs: changes
+    if: ${{ !cancelled() && (needs.changes.result != 'success' || fromJSON(needs.changes.outputs.changes).yaml) }}
     name: YAML lint
     runs-on: ubuntu-latest
 
