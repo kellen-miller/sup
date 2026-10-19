@@ -71,21 +71,23 @@ Supported job keys:
 are expanded when the config is loaded. Missing required environment variables
 cause optional jobs to be skipped before execution.
 
-The default `skills` job runs the public agent-skills project's locked
-`skillctl` environment when the checkout is installed:
+The default `skills` job builds and runs the public agent-skills project's Rust
+`skillctl` from its checkout with locked dependencies:
 
 ```bash
 uv run --project . sup --only skills
 ```
 
-It clears any inherited virtual environment, then calls:
+It calls:
 
 ```bash
-env -u VIRTUAL_ENV uv run --project "$HOME/.agents/skills" --locked skillctl sync
+cargo run --quiet --locked --manifest-path "$HOME/.agents/skills/Cargo.toml" --bin skillctl -- sync --root "$HOME/.agents/skills"
 ```
 
-If `uv` or the skills project's `pyproject.toml`, `uv.lock`, or `deps.yaml` is
-missing, the optional `skills` job is skipped.
+If `cargo` or the skills project's `Cargo.toml`, `Cargo.lock`, or `deps.yaml` is
+missing, the optional `skills` job is skipped. The explicit root selects the
+skills checkout regardless of Sup's working directory. A separately installed
+`skillctl` binary is not required.
 
 The Node job closes pnpm's stdin so global updates cannot open build-approval
 prompts while output is captured. Existing build approvals still apply;
