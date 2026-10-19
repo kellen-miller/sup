@@ -184,21 +184,23 @@ jobs:
     label: Agent skills
     phase: parallel
     command:
-      - env
-      - -u
-      - VIRTUAL_ENV
-      - uv
+      - cargo
       - run
-      - --project
-      - $HOME/.agents/skills
+      - --quiet
       - --locked
+      - --manifest-path
+      - $HOME/.agents/skills/Cargo.toml
+      - --bin
       - skillctl
+      - --
       - sync
+      - --root
+      - $HOME/.agents/skills
     required_commands:
-      - 'uv'
+      - 'cargo'
     required_paths:
-      - $HOME/.agents/skills/pyproject.toml
-      - $HOME/.agents/skills/uv.lock
+      - $HOME/.agents/skills/Cargo.toml
+      - $HOME/.agents/skills/Cargo.lock
       - $HOME/.agents/skills/deps.yaml
     optional: true
     log_name: skills.log

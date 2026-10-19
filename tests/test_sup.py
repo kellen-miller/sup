@@ -411,9 +411,9 @@ class RunnerTest(unittest.TestCase):
         results = runner.run(jobs, dry_run=False)
 
         self.assertEqual(results[0].status, "skipped")
-        self.assertIn(".agents/skills/pyproject.toml", results[0].reason)
+        self.assertIn(".agents/skills/Cargo.toml", results[0].reason)
 
-    def test_skills_job_uses_locked_skillctl_project(self):
+    def test_skills_job_uses_locked_rust_skillctl_project(self):
         with tempfile.TemporaryDirectory() as tmp:
             home = Path(tmp)
             project = home / ".agents" / "skills"
@@ -426,24 +426,26 @@ class RunnerTest(unittest.TestCase):
         self.assertEqual(
             jobs[0].command,
             (
-                "env",
-                "-u",
-                "VIRTUAL_ENV",
-                "uv",
+                "cargo",
                 "run",
-                "--project",
-                str(project),
+                "--quiet",
                 "--locked",
+                "--manifest-path",
+                str(project / "Cargo.toml"),
+                "--bin",
                 "skillctl",
+                "--",
                 "sync",
+                "--root",
+                str(project),
             ),
         )
-        self.assertEqual(jobs[0].required_commands, ("uv",))
+        self.assertEqual(jobs[0].required_commands, ("cargo",))
         self.assertEqual(
             jobs[0].required_paths,
             (
-                project / "pyproject.toml",
-                project / "uv.lock",
+                project / "Cargo.toml",
+                project / "Cargo.lock",
                 project / "deps.yaml",
             ),
         )
@@ -475,16 +477,18 @@ class RunnerTest(unittest.TestCase):
             calls,
             [
                 (
-                    "env",
-                    "-u",
-                    "VIRTUAL_ENV",
-                    "uv",
+                    "cargo",
                     "run",
-                    "--project",
-                    str(project),
+                    "--quiet",
                     "--locked",
+                    "--manifest-path",
+                    str(project / "Cargo.toml"),
+                    "--bin",
                     "skillctl",
+                    "--",
                     "sync",
+                    "--root",
+                    str(project),
                 )
             ],
         )
