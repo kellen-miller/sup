@@ -159,8 +159,7 @@ jobs:
     label: Rust toolchain
     phase: parallel
     command:
-      - 'rustup'
-      - 'update'
+      - 'sup-rust-update'
     required_commands:
       - 'rustup'
     optional: true
