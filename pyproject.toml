@@ -11,6 +11,7 @@ dependencies = [
 
 [project.scripts]
 sup = "sup.cli:main"
+sup-rust-update = "sup.rust:main"
 
 [dependency-groups]
 dev = ["yamllint==1.38.0"]
