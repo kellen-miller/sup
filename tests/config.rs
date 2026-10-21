@@ -25,12 +25,7 @@ fn shipped_defaults_are_versioned_and_homebrew_is_on_demand() {
     .unwrap();
     assert_eq!(loaded.source, "embedded defaults");
     assert_eq!(
-        loaded
-            .jobs
-            .iter()
-            .find(|job| job.name == "brew-upgrade")
-            .unwrap()
-            .auth,
+        loaded.jobs.iter().find(|job| job.name == "brew-upgrade").unwrap().auth,
         AuthMode::OnDemand
     );
 }
@@ -45,45 +40,31 @@ fn expansion_matches_safe_substitute_cases() {
         loaded.jobs[0].command[1],
         "value value $ $MISSING $1 $ ${X:-default} $é ${é}"
     );
-    assert_eq!(
-        loaded.jobs[0].required_paths[0],
-        Path::new("value/$UNKNOWN")
-    );
+    assert_eq!(loaded.jobs[0].required_paths[0], Path::new("value/$UNKNOWN"));
     assert_eq!(loaded.jobs[0].required_commands, ["$X"]);
 }
 
 #[test]
 fn rejects_toml_legacy_boolean_spellings_and_migration_fields() {
+    assert!(load_text("version=1\n[[jobs]]\nname='job'\nphase='core'\ncommand=['echo']\noptional='yes'\n").is_err());
     assert!(
-        load_text(
-            "version=1\n[[jobs]]\nname='job'\nphase='core'\ncommand=['echo']\noptional='yes'\n"
-        )
-        .is_err()
+        load_text("version=1\n[[jobs]]\nname='job'\nphase='core'\ncommand=['echo']\nsudo_preflight=false\n").is_err()
     );
-    assert!(load_text("version=1\n[[jobs]]\nname='job'\nphase='core'\ncommand=['echo']\nsudo_preflight=false\n").is_err());
 }
 
 #[test]
 fn validates_names_alias_collisions_and_references() {
-    let collision =
-        "version=1\n[aliases]\na=['job']\n[[jobs]]\nname='a'\nphase='core'\ncommand=['echo']\n";
+    let collision = "version=1\n[aliases]\na=['job']\n[[jobs]]\nname='a'\nphase='core'\ncommand=['echo']\n";
     assert!(load_text(collision).unwrap_err().contains("collides"));
     let unknown = "version=1\n[aliases]\na=['missing']\n[[jobs]]\nname='job'\nphase='core'\ncommand=['echo']\n";
     assert!(load_text(unknown).unwrap_err().contains("unknown job"));
-    assert!(
-        load_text("version=1\n[[jobs]]\nname='bad name'\nphase='core'\ncommand=['echo']\n")
-            .is_err()
-    );
+    assert!(load_text("version=1\n[[jobs]]\nname='bad name'\nphase='core'\ncommand=['echo']\n").is_err());
 }
 
 #[test]
 fn validates_log_names_for_traversal_and_duplicates() {
     let traversal = "version=1\n[[jobs]]\nname='one'\nphase='core'\ncommand=['echo']\nlog_name='../outside.log'\n";
-    assert!(
-        load_text(traversal)
-            .unwrap_err()
-            .contains("simple filename")
-    );
+    assert!(load_text(traversal).unwrap_err().contains("simple filename"));
     let duplicate = "version=1\n[[jobs]]\nname='one'\nphase='core'\ncommand=['echo']\nlog_name='same.log'\n[[jobs]]\nname='two'\nphase='core'\ncommand=['echo']\nlog_name='same.log'\n";
     assert!(load_text(duplicate).unwrap_err().contains("duplicate log"));
 }
@@ -104,8 +85,7 @@ fn rejects_unknown_fields_types_versions_phases_and_empty_executables() {
     assert!(load_text("version=1\n[[jobs]]\nname='job'\nphase='wat'\ncommand=['echo']\n").is_err());
     assert!(load_text("version=1\n[[jobs]]\nname='job'\nphase='core'\ncommand=['']\n").is_err());
     assert!(load_text("version=1\n[[jobs]]\nname='job'\nphase='core'\ncommand=[]\n").is_err());
-    let accepts_empty_arg =
-        load_text("version=1\n[[jobs]]\nname='job'\nphase='core'\ncommand=['echo', '']\n").unwrap();
+    let accepts_empty_arg = load_text("version=1\n[[jobs]]\nname='job'\nphase='core'\ncommand=['echo', '']\n").unwrap();
     assert_eq!(accepts_empty_arg.jobs[0].command, ["echo", ""]);
 }
 
@@ -114,10 +94,7 @@ fn yaml_migration_changes_only_direct_brew_policy_and_preserves_literal_values()
     let text = "jobs:\n  - name: brew-upgrade\n    phase: core\n    command: [brew, upgrade, '$HOME']\n    required_commands: ['$TOOL']\n    required_paths: ['$HOME/file']\n    sudo_preflight: true\n  - name: unrelated\n    phase: parallel\n    command: [echo, '$HOME']\n    sudo_preflight: true\n";
     let (migrated, notices) = config::migrate_yaml(text, Path::new("/h"), &env()).unwrap();
     let migrated_config: config::Config = toml::from_str(&migrated).unwrap();
-    assert_eq!(
-        migrated_config.jobs[0].command,
-        ["brew", "upgrade", "$HOME"]
-    );
+    assert_eq!(migrated_config.jobs[0].command, ["brew", "upgrade", "$HOME"]);
     assert_eq!(migrated_config.jobs[0].required_commands, ["$TOOL"]);
     assert_eq!(migrated_config.jobs[0].required_paths, ["$HOME/file"]);
     assert!(migrated.contains("auth = \"on-demand\""));
@@ -147,22 +124,18 @@ fn accepts_supported_legacy_boolean_spellings_and_rejects_other_values() {
         ("no", false),
         ("off", false),
     ] {
-        let text = format!(
-            "jobs:\n  - name: job\n    phase: core\n    command: [echo, hi]\n    optional: {value}\n"
-        );
+        let text = format!("jobs:\n  - name: job\n    phase: core\n    command: [echo, hi]\n    optional: {value}\n");
         let (migrated, _) = config::migrate_yaml(&text, Path::new("/h"), &env()).unwrap();
         let parsed: config::Config = toml::from_str(&migrated).unwrap();
         assert_eq!(parsed.jobs[0].optional, expected, "{value}");
     }
-    let invalid =
-        "jobs:\n  - name: job\n    phase: core\n    command: [echo, hi]\n    optional: maybe\n";
+    let invalid = "jobs:\n  - name: job\n    phase: core\n    command: [echo, hi]\n    optional: maybe\n";
     assert!(config::migrate_yaml(invalid, Path::new("/h"), &env()).is_err());
 }
 
 #[test]
 fn yaml_rejects_duplicates_unsupported_tags_and_unknown_fields() {
-    let duplicate =
-        "jobs:\n  - name: one\n    name: two\n    phase: core\n    command: [echo, hi]\n";
+    let duplicate = "jobs:\n  - name: one\n    name: two\n    phase: core\n    command: [echo, hi]\n";
     assert!(config::migrate_yaml(duplicate, Path::new("/h"), &env()).is_err());
     let tagged = "jobs: !ApplicationTag []\n";
     assert!(config::migrate_yaml(tagged, Path::new("/h"), &env()).is_err());
@@ -182,22 +155,10 @@ fn yaml_accepts_bounded_anchor_and_merge_alias() {
 #[test]
 fn selectors_deduplicate_split_commas_skip_wins_and_keep_config_order() {
     let loaded = load_text("version=1\n[[jobs]]\nname='first'\nphase='core'\ncommand=['echo']\n[[jobs]]\nname='second'\nphase='core'\ncommand=['echo']\n[[jobs]]\nname='third'\nphase='core'\ncommand=['echo']\n").unwrap();
-    let aliases = HashMap::from([(
-        "all".to_owned(),
-        vec!["first".to_owned(), "second".to_owned()],
-    )]);
-    let selected = config::selectors(
-        &loaded.jobs,
-        &aliases,
-        &["all,third,all".into()],
-        &["first".into()],
-    )
-    .unwrap();
+    let aliases = HashMap::from([("all".to_owned(), vec!["first".to_owned(), "second".to_owned()])]);
+    let selected = config::selectors(&loaded.jobs, &aliases, &["all,third,all".into()], &["first".into()]).unwrap();
     assert_eq!(
-        selected
-            .iter()
-            .map(|job| job.name.as_str())
-            .collect::<Vec<_>>(),
+        selected.iter().map(|job| job.name.as_str()).collect::<Vec<_>>(),
         ["second", "third"]
     );
     assert!(config::selectors(&loaded.jobs, &aliases, &["missing".into()], &[]).is_err());
@@ -211,11 +172,7 @@ fn selectors_deduplicate_split_commas_skip_wins_and_keep_config_order() {
 #[test]
 fn config_lookup_uses_xdg_home_and_never_cwd_fallback() {
     let empty = HashMap::new();
-    assert!(
-        config::resolve_path(None, &empty)
-            .unwrap_err()
-            .contains("HOME")
-    );
+    assert!(config::resolve_path(None, &empty).unwrap_err().contains("HOME"));
     assert_eq!(
         config::resolve_path(Some(Path::new("explicit.toml")), &empty).unwrap(),
         (Path::new("explicit.toml").to_path_buf(), true)

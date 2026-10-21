@@ -165,10 +165,12 @@ impl AuthSession {
             .unwrap_or(Path::new("."))
             .join("sup-askpass");
         if !helper.is_absolute()
-            || !fs::metadata(&helper)
-                .is_ok_and(|meta| meta.is_file() && meta.permissions().mode() & 0o111 != 0)
+            || !fs::metadata(&helper).is_ok_and(|meta| meta.is_file() && meta.permissions().mode() & 0o111 != 0)
         {
-            return Err("sup-askpass is missing or not executable; run cargo build --bins or reinstall all binaries together".into());
+            return Err(
+                "sup-askpass is missing or not executable; run cargo build --bins or reinstall all binaries together"
+                    .into(),
+            );
         }
 
         disable_core_dumps()?;
@@ -185,14 +187,7 @@ impl AuthSession {
             .tempdir_in(temporary_root)
             .map_err(|error| format!("cannot create auth directory: {error}"))?;
         // Darwin sockaddr_un.sun_path is 104 bytes, including its trailing NUL.
-        if directory
-            .path()
-            .join("s")
-            .as_os_str()
-            .as_encoded_bytes()
-            .len()
-            >= 104
-        {
+        if directory.path().join("s").as_os_str().as_encoded_bytes().len() >= 104 {
             directory = tempfile::Builder::new()
                 .prefix("sa-")
                 .tempdir_in("/tmp")
@@ -202,8 +197,7 @@ impl AuthSession {
         fs::set_permissions(directory.path(), fs::Permissions::from_mode(0o700))
             .map_err(|error| format!("cannot secure auth directory: {error}"))?;
         let socket = directory.path().join("s");
-        let listener = UnixListener::bind(&socket)
-            .map_err(|error| format!("cannot bind auth socket: {error}"))?;
+        let listener = UnixListener::bind(&socket).map_err(|error| format!("cannot bind auth socket: {error}"))?;
         fs::set_permissions(&socket, fs::Permissions::from_mode(0o600))
             .map_err(|error| format!("cannot secure auth socket: {error}"))?;
         listener.set_nonblocking(true).map_err(|e| e.to_string())?;
@@ -264,8 +258,7 @@ impl AuthSession {
                 let due = {
                     let state = refresh_state.lock().unwrap_or_else(|e| e.into_inner());
                     let due = state.probe_due.or(state.refresh_due);
-                    due.filter(|due| *due <= Instant::now())
-                        .map(|_| state.generation)
+                    due.filter(|due| *due <= Instant::now()).map(|_| state.generation)
                 };
                 if let Some(generation) = due {
                     // A delivered password is only a reason to probe; it is not a ticket.
@@ -314,8 +307,7 @@ impl AuthSession {
         }
 
         let mut random = [0; 32];
-        getrandom::fill(&mut random)
-            .map_err(|error| format!("cannot create auth token: {error}"))?;
+        getrandom::fill(&mut random).map_err(|error| format!("cannot create auth token: {error}"))?;
         let token: String = random.iter().map(|byte| format!("{byte:02x}")).collect();
         let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
         state.jobs.insert(
@@ -407,8 +399,7 @@ impl Drop for JobAuthorization {
 }
 
 fn disable_core_dumps() -> Result<(), String> {
-    setrlimit(Resource::RLIMIT_CORE, 0, 0)
-        .map_err(|error| format!("cannot disable core dumps: {error}"))
+    setrlimit(Resource::RLIMIT_CORE, 0, 0).map_err(|error| format!("cannot disable core dumps: {error}"))
 }
 
 struct BrokerConnection {
@@ -423,17 +414,12 @@ impl BrokerConnection {
     fn respond(mut self) -> io::Result<()> {
         self.io.stream.set_nonblocking(true)?;
         #[cfg(target_os = "macos")]
-        let uid = nix::unistd::getpeereid(&self.io.stream)
-            .map_err(io::Error::other)?
-            .0;
+        let uid = nix::unistd::getpeereid(&self.io.stream).map_err(io::Error::other)?.0;
         #[cfg(target_os = "linux")]
         let uid = nix::unistd::Uid::from_raw(
-            nix::sys::socket::getsockopt(
-                &self.io.stream,
-                nix::sys::socket::sockopt::PeerCredentials,
-            )
-            .map_err(io::Error::other)?
-            .uid(),
+            nix::sys::socket::getsockopt(&self.io.stream, nix::sys::socket::sockopt::PeerCredentials)
+                .map_err(io::Error::other)?
+                .uid(),
         );
         if uid != nix::unistd::getuid() {
             return Err(io::Error::other("auth peer rejected"));
@@ -509,11 +495,7 @@ impl BrokerConnection {
                         // Serialize the final authorization check with token revocation.
                         // The write is bounded, and no secret enters shared state.
                         let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
-                        if !state
-                            .jobs
-                            .get(&token)
-                            .is_some_and(|job| job.cancelled.is_none())
-                        {
+                        if !state.jobs.get(&token).is_some_and(|job| job.cancelled.is_none()) {
                             break Err(io::Error::other("auth job ended"));
                         }
 
@@ -568,10 +550,7 @@ struct SocketIo {
 
 impl SocketIo {
     fn check(&self) -> io::Result<()> {
-        if self.stopped.load(Ordering::SeqCst)
-            || self.cancellation.is_cancelled()
-            || Instant::now() >= self.deadline
-        {
+        if self.stopped.load(Ordering::SeqCst) || self.cancellation.is_cancelled() || Instant::now() >= self.deadline {
             return Err(io::Error::other("authentication cancelled or expired"));
         }
 
@@ -598,12 +577,7 @@ impl SocketIo {
                 Ok(count) => {
                     bytes = &mut bytes[count..];
                 }
-                Err(error)
-                    if matches!(
-                        error.kind(),
-                        io::ErrorKind::WouldBlock | io::ErrorKind::Interrupted
-                    ) =>
-                {
+                Err(error) if matches!(error.kind(), io::ErrorKind::WouldBlock | io::ErrorKind::Interrupted) => {
                     thread::sleep(Duration::from_millis(10));
                 }
                 Err(error) => return Err(error),
@@ -621,12 +595,7 @@ impl SocketIo {
                 Ok(count) => {
                     bytes = &bytes[count..];
                 }
-                Err(error)
-                    if matches!(
-                        error.kind(),
-                        io::ErrorKind::WouldBlock | io::ErrorKind::Interrupted
-                    ) =>
-                {
+                Err(error) if matches!(error.kind(), io::ErrorKind::WouldBlock | io::ErrorKind::Interrupted) => {
                     thread::sleep(Duration::from_millis(10));
                 }
                 Err(error) => return Err(error),
@@ -683,14 +652,10 @@ fn sanitize_prompt(bytes: &[u8]) -> String {
 /// Askpass entry point: its stdout contains only the current supplied password.
 pub fn askpass(prompt: &str) -> Result<(), String> {
     disable_core_dumps()?;
-    let socket = std::env::var_os(SOCKET_ENV)
-        .ok_or("authentication-bootstrap error: missing private broker coordinates")?;
-    let token = std::env::var(TOKEN_ENV)
-        .map_err(|_| "authentication-bootstrap error: missing private job token")?;
-    if !Path::new(&socket).is_absolute()
-        || token.len() != 64
-        || !token.bytes().all(|byte| byte.is_ascii_hexdigit())
-    {
+    let socket =
+        std::env::var_os(SOCKET_ENV).ok_or("authentication-bootstrap error: missing private broker coordinates")?;
+    let token = std::env::var(TOKEN_ENV).map_err(|_| "authentication-bootstrap error: missing private job token")?;
+    if !Path::new(&socket).is_absolute() || token.len() != 64 || !token.bytes().all(|byte| byte.is_ascii_hexdigit()) {
         return Err("authentication-bootstrap error: invalid broker coordinates".into());
     }
 
@@ -802,11 +767,7 @@ fn sudo_status(
     let mut success = false;
     let mut reaped = false;
     loop {
-        let no_jobs = state
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .jobs
-            .is_empty();
+        let no_jobs = state.lock().unwrap_or_else(|e| e.into_inner()).jobs.is_empty();
         let cancelled = cancellation.is_cancelled()
             || stopped.load(Ordering::SeqCst)
             || no_jobs
@@ -828,9 +789,7 @@ fn sudo_status(
         if waited == pid {
             if libc::WIFEXITED(status) || libc::WIFSIGNALED(status) {
                 reaped = true;
-                success = terminate_at.is_none()
-                    && libc::WIFEXITED(status)
-                    && libc::WEXITSTATUS(status) == 0;
+                success = terminate_at.is_none() && libc::WIFEXITED(status) && libc::WEXITSTATUS(status) == 0;
             } else if libc::WIFSTOPPED(status) {
                 unsafe {
                     libc::kill(-pid, libc::SIGCONT);
@@ -877,11 +836,7 @@ impl PlainPrompt {
     pub fn new() -> Self {
         Self {
             tty: if std::io::stdin().is_terminal() {
-                OpenOptions::new()
-                    .read(true)
-                    .write(true)
-                    .open("/dev/tty")
-                    .ok()
+                OpenOptions::new().read(true).write(true).open("/dev/tty").ok()
             } else {
                 None
             },
@@ -889,17 +844,11 @@ impl PlainPrompt {
     }
 
     pub fn respond(&mut self, request: AuthRequest, cancellation: &Cancellation) {
-        let reply = self
-            .read(&request, cancellation)
-            .unwrap_or(PasswordReply::Cancel);
+        let reply = self.read(&request, cancellation).unwrap_or(PasswordReply::Cancel);
         request.one_use_reply.respond(reply);
     }
 
-    fn read(
-        &mut self,
-        request: &AuthRequest,
-        cancellation: &Cancellation,
-    ) -> io::Result<PasswordReply> {
+    fn read(&mut self, request: &AuthRequest, cancellation: &Cancellation) -> io::Result<PasswordReply> {
         let Some(tty) = &mut self.tty else {
             return Ok(PasswordReply::Cancel);
         };
@@ -912,8 +861,7 @@ impl PlainPrompt {
             .remove(nix::sys::termios::LocalFlags::ECHO | nix::sys::termios::LocalFlags::ICANON);
         mode.control_chars[nix::sys::termios::SpecialCharacterIndices::VMIN as usize] = 0;
         mode.control_chars[nix::sys::termios::SpecialCharacterIndices::VTIME as usize] = 0;
-        nix::sys::termios::tcsetattr(&*tty, nix::sys::termios::SetArg::TCSANOW, &mode)
-            .map_err(io::Error::other)?;
+        nix::sys::termios::tcsetattr(&*tty, nix::sys::termios::SetArg::TCSANOW, &mode).map_err(io::Error::other)?;
         let terminal = PromptTerminal { tty, original };
         write!(
             terminal.tty,
@@ -975,11 +923,7 @@ struct PromptTerminal<'a> {
 impl Drop for PromptTerminal<'_> {
     fn drop(&mut self) {
         let _ = nix::sys::termios::tcflush(&*self.tty, nix::sys::termios::FlushArg::TCIFLUSH);
-        let _ = nix::sys::termios::tcsetattr(
-            &*self.tty,
-            nix::sys::termios::SetArg::TCSANOW,
-            &self.original,
-        );
+        let _ = nix::sys::termios::tcsetattr(&*self.tty, nix::sys::termios::SetArg::TCSANOW, &self.original);
         let _ = writeln!(self.tty);
     }
 }

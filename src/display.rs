@@ -113,9 +113,7 @@ impl Dashboard {
     fn trim_history(&mut self) {
         while self.records.len() > HISTORY_EVENTS || self.bytes > HISTORY_BYTES {
             if let Some(record) = self.records.pop_front() {
-                self.bytes = self
-                    .bytes
-                    .saturating_sub(record.text.len() + record.job.len());
+                self.bytes = self.bytes.saturating_sub(record.text.len() + record.job.len());
                 self.pending.retain(|_, index| *index > 0);
                 for index in self.pending.values_mut() {
                     *index -= 1;
@@ -278,12 +276,7 @@ fn truncate_event(mut text: String) -> String {
     text
 }
 
-pub fn render(
-    frame: &mut ratatui::Frame<'_>,
-    dashboard: &Dashboard,
-    jobs: &[Job],
-    statuses: &HashMap<String, String>,
-) {
+pub fn render(frame: &mut ratatui::Frame<'_>, dashboard: &Dashboard, jobs: &[Job], statuses: &HashMap<String, String>) {
     let area = frame.area();
     if area.width == 0 || area.height == 0 {
         return;
@@ -294,11 +287,7 @@ pub fn render(
     );
     let vertical = Layout::default()
         .direction(Direction::Vertical)
-        .constraints([
-            Constraint::Length(1),
-            Constraint::Min(3),
-            Constraint::Length(1),
-        ])
+        .constraints([Constraint::Length(1), Constraint::Min(3), Constraint::Length(1)])
         .split(area);
     let title = Paragraph::new(Line::from(vec![
         Span::styled(
@@ -312,14 +301,8 @@ pub fn render(
             format!(
                 " {} jobs · {} running · {} failed · {} events ",
                 jobs.len(),
-                statuses
-                    .values()
-                    .filter(|status| status.as_str() == "running")
-                    .count(),
-                statuses
-                    .values()
-                    .filter(|status| status.as_str() == "failed")
-                    .count(),
+                statuses.values().filter(|status| status.as_str() == "running").count(),
+                statuses.values().filter(|status| status.as_str() == "failed").count(),
                 dashboard.records.len()
             ),
             Style::default().fg(tokyo_blue()),
@@ -332,11 +315,7 @@ pub fn render(
     } else {
         0
     };
-    let job_rows = if job_count > 0 {
-        job_count as u16 + 3
-    } else {
-        0
-    };
+    let job_rows = if job_count > 0 { job_count as u16 + 3 } else { 0 };
     let hidden = jobs.len().saturating_sub(job_count);
     let middle = Layout::default()
         .direction(Direction::Vertical)
@@ -350,18 +329,14 @@ pub fn render(
             _ => 2,
         });
         let rows = ordered.into_iter().take(job_count).map(|job| {
-            let status = statuses
-                .get(&job.name)
-                .cloned()
-                .unwrap_or_else(|| "queued".to_owned());
+            let status = statuses.get(&job.name).cloned().unwrap_or_else(|| "queued".to_owned());
             let color = match status.as_str() {
                 "running" => tokyo_cyan(),
                 "failed" => tokyo_red(),
                 "succeeded" => tokyo_green(),
                 _ => tokyo_muted(),
             };
-            Row::new(vec![job.label.clone(), job.name.clone(), status])
-                .style(Style::default().fg(color))
+            Row::new(vec![job.label.clone(), job.name.clone(), status]).style(Style::default().fg(color))
         });
         let table = Table::new(
             rows,
@@ -372,11 +347,8 @@ pub fn render(
             ],
         )
         .header(
-            Row::new(vec!["Job", "Name", "State"]).style(
-                Style::default()
-                    .fg(tokyo_blue())
-                    .add_modifier(Modifier::BOLD),
-            ),
+            Row::new(vec!["Job", "Name", "State"])
+                .style(Style::default().fg(tokyo_blue()).add_modifier(Modifier::BOLD)),
         )
         .block(
             Block::default()
@@ -416,10 +388,7 @@ pub fn render(
                     .collect::<Vec<_>>()
                     .join(" ⏎ ");
                 Line::from(vec![
-                    Span::styled(
-                        format!("{} › ", record.job),
-                        Style::default().fg(tokyo_purple()),
-                    ),
+                    Span::styled(format!("{} › ", record.job), Style::default().fg(tokyo_purple())),
                     Span::raw(text),
                 ])
             })
@@ -469,10 +438,7 @@ pub fn run(
                     RunEvent::Output { job, text } => dashboard.push(&job, &text),
                     RunEvent::Finished(result) => {
                         dashboard.finish_job(&result.job.name);
-                        states.insert(
-                            result.job.name.clone(),
-                            format!("{:?}", result.status).to_lowercase(),
-                        );
+                        states.insert(result.job.name.clone(), format!("{:?}", result.status).to_lowercase());
                     }
                 },
                 Err(std::sync::mpsc::TryRecvError::Disconnected) => {
@@ -527,17 +493,13 @@ pub fn run(
                                 cancellation.cancel();
                             }
                             KeyCode::Esc => request.one_use_reply.respond(PasswordReply::Cancel),
-                            KeyCode::Enter => {
-                                request.one_use_reply.respond(PasswordReply::Submit(secret))
-                            }
+                            KeyCode::Enter => request.one_use_reply.respond(PasswordReply::Submit(secret)),
                             KeyCode::Backspace => {
                                 secret.backspace();
                                 password = Some((request, secret));
                             }
                             KeyCode::Char(ch)
-                                if !key
-                                    .modifiers
-                                    .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT) =>
+                                if !key.modifiers.intersects(KeyModifiers::CONTROL | KeyModifiers::ALT) =>
                             {
                                 let mut buffer = [0; 4];
                                 let encoded = ch.encode_utf8(&mut buffer);
@@ -546,9 +508,7 @@ pub fn run(
                                         request.one_use_reply.respond(PasswordReply::Cancel);
                                         cancellation.cancel();
                                         buffer.zeroize();
-                                        return Err(
-                                            "password exceeded the supported length".to_owned()
-                                        );
+                                        return Err("password exceeded the supported length".to_owned());
                                     }
                                 }
                                 buffer.zeroize();

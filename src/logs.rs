@@ -27,8 +27,7 @@ pub fn create_run_dir(home: &Path) -> io::Result<PathBuf> {
                     Ok(()) => {}
                     Err(create_error) if create_error.kind() == io::ErrorKind::AlreadyExists => {
                         match fs::symlink_metadata(directory) {
-                            Ok(metadata)
-                                if metadata.is_dir() && !metadata.file_type().is_symlink() => {}
+                            Ok(metadata) if metadata.is_dir() && !metadata.file_type().is_symlink() => {}
                             Ok(_) => {
                                 return Err(io::Error::new(
                                     io::ErrorKind::InvalidInput,
@@ -76,10 +75,7 @@ pub fn create_job_log(run_dir: &Path, name: &str) -> io::Result<(PathBuf, fs::Fi
         || name.contains('\\')
         || name.contains('\0')
     {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidInput,
-            "unsafe log filename",
-        ));
+        return Err(io::Error::new(io::ErrorKind::InvalidInput, "unsafe log filename"));
     }
     let path = run_dir.join(name);
     let mut options = OpenOptions::new();
@@ -101,9 +97,7 @@ pub fn cleanup_old_runs(home: &Path, current: &Path, retention_days: i64) -> io:
         Err(error) => return Err(error),
     };
     let cutoff = SystemTime::now()
-        .checked_sub(Duration::from_secs(
-            (retention_days as u64).saturating_mul(86_400),
-        ))
+        .checked_sub(Duration::from_secs((retention_days as u64).saturating_mul(86_400)))
         .unwrap_or(UNIX_EPOCH);
     for entry in entries {
         let entry = entry?;
@@ -112,8 +106,7 @@ pub fn cleanup_old_runs(home: &Path, current: &Path, retention_days: i64) -> io:
             continue;
         }
         let metadata = fs::symlink_metadata(&path)?;
-        if metadata.file_type().is_symlink() || !metadata.is_dir() || metadata.modified()? >= cutoff
-        {
+        if metadata.file_type().is_symlink() || !metadata.is_dir() || metadata.modified()? >= cutoff {
             continue;
         }
         fs::remove_dir_all(path)?;

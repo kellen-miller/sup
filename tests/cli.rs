@@ -32,11 +32,7 @@ fn plan_and_list_do_not_execute_synthetic_commands() {
             .current_dir(&home)
             .output()
             .unwrap();
-        assert!(
-            result.status.success(),
-            "{}",
-            String::from_utf8_lossy(&result.stderr)
-        );
+        assert!(result.status.success(), "{}", String::from_utf8_lossy(&result.stderr));
     }
     assert!(!marker.exists());
 }
@@ -91,11 +87,7 @@ fn migration_exclusively_creates_output() {
         .output()
         .unwrap();
     assert!(!second.status.success());
-    assert!(
-        std::fs::read_to_string(input)
-            .unwrap()
-            .contains("name: one")
-    );
+    assert!(std::fs::read_to_string(input).unwrap().contains("name: one"));
 }
 
 #[test]
@@ -140,11 +132,7 @@ fn explicit_false_preflight_migration_plans_through_cli() {
         .current_dir(&home)
         .output()
         .unwrap();
-    assert!(
-        planned.status.success(),
-        "{}",
-        String::from_utf8_lossy(&planned.stderr)
-    );
+    assert!(planned.status.success(), "{}", String::from_utf8_lossy(&planned.stderr));
     assert!(String::from_utf8_lossy(&planned.stdout).contains("harmless"));
 }
 
@@ -274,11 +262,7 @@ fn run_uses_only_the_explicit_synthetic_config() {
         .current_dir(&home)
         .output()
         .unwrap();
-    assert!(
-        result.status.success(),
-        "{}",
-        String::from_utf8_lossy(&result.stderr)
-    );
+    assert!(result.status.success(), "{}", String::from_utf8_lossy(&result.stderr));
     assert!(String::from_utf8_lossy(&result.stdout).contains("fixture-output"));
     assert!(home.join(".cache/sup/runs").exists());
 
@@ -333,10 +317,7 @@ fn tty_stopped_child_fails_and_is_terminated() {
         },
         0
     );
-    assert_ne!(
-        unsafe { libc::fcntl(master, libc::F_SETFL, libc::O_NONBLOCK) },
-        -1
-    );
+    assert_ne!(unsafe { libc::fcntl(master, libc::F_SETFL, libc::O_NONBLOCK) }, -1);
     let master = unsafe { File::from_raw_fd(master) };
     let slave = unsafe { File::from_raw_fd(slave) };
     let stdin = slave.try_clone().unwrap();
@@ -405,12 +386,16 @@ fn tty_stopped_child_fails_and_is_terminated() {
 fn plain_output_keeps_crlf_text_and_strips_hyperlink_sequences() {
     let home = tempfile::tempdir().unwrap();
     let config = home.path().join("config.toml");
-    std::fs::write(&config, r#"version = 1
+    std::fs::write(
+        &config,
+        r#"version = 1
 [[jobs]]
 name = 'output'
 phase = 'core'
 command = ['/bin/sh', '-c', '''printf '\033]8;;https://example.test\033\\link\033]8;;\033\\\r\nnext\r\n' ''']
-"#).unwrap();
+"#,
+    )
+    .unwrap();
     let output = Command::new(env!("CARGO_BIN_EXE_sup"))
         .args(["--no-tui", "--config"])
         .arg(config)
@@ -420,11 +405,7 @@ command = ['/bin/sh', '-c', '''printf '\033]8;;https://example.test\033\\link\03
         .current_dir(home.path())
         .output()
         .unwrap();
-    assert!(
-        output.status.success(),
-        "{}",
-        String::from_utf8_lossy(&output.stderr)
-    );
+    assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
     let text = String::from_utf8_lossy(&output.stdout);
     assert!(text.contains("link"), "{text}");
     assert!(text.contains("next"), "{text}");

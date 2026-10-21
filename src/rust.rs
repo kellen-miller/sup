@@ -34,9 +34,7 @@ pub fn update() -> i32 {
         .stdin(Stdio::null())
         .output()
     {
-        Ok(output) if output.status.success() => {
-            String::from_utf8_lossy(&output.stdout).into_owned()
-        }
+        Ok(output) if output.status.success() => String::from_utf8_lossy(&output.stdout).into_owned(),
         Ok(output) => {
             eprint!("{}", String::from_utf8_lossy(&output.stderr));
             return output.status.code().unwrap_or(1);
@@ -46,14 +44,8 @@ pub fn update() -> i32 {
             return 1;
         }
     };
-    let default = match Command::new("rustup")
-        .arg("default")
-        .stdin(Stdio::null())
-        .output()
-    {
-        Ok(output) if output.status.success() => {
-            String::from_utf8_lossy(&output.stdout).into_owned()
-        }
+    let default = match Command::new("rustup").arg("default").stdin(Stdio::null()).output() {
+        Ok(output) if output.status.success() => String::from_utf8_lossy(&output.stdout).into_owned(),
         Ok(output) => {
             eprint!("{}", String::from_utf8_lossy(&output.stderr));
             return output.status.code().unwrap_or(1);

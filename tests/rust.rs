@@ -41,11 +41,7 @@ fn successful_update_preserves_custom_channels_and_removes_numbered_releases() {
         .env("RUSTUP_CALLS", &calls)
         .output()
         .unwrap();
-    assert!(
-        output.status.success(),
-        "{}",
-        String::from_utf8_lossy(&output.stderr)
-    );
+    assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
     let calls = std::fs::read_to_string(calls).unwrap();
     assert!(calls.contains("toolchain uninstall 1.80.0-x86_64-unknown-linux-gnu"));
     assert!(!calls.contains("toolchain uninstall custom-local"));
@@ -54,10 +50,7 @@ fn successful_update_preserves_custom_channels_and_removes_numbered_releases() {
 #[test]
 fn failed_compiler_validation_never_uninstalls_toolchains() {
     let directory = tempfile::tempdir().unwrap();
-    fake_rustup(
-        directory.path(),
-        "case \"$1 $2\" in 'run nightly') exit 9;; esac",
-    );
+    fake_rustup(directory.path(), "case \"$1 $2\" in 'run nightly') exit 9;; esac");
     let calls = directory.path().join("calls");
     let output = Command::new(env!("CARGO_BIN_EXE_sup-rust-update"))
         .env("PATH", directory.path())

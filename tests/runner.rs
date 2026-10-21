@@ -33,11 +33,7 @@ fn core_jobs_continue_after_failure_and_results_keep_config_order() {
     let home = tempfile::tempdir().unwrap();
     let jobs = vec![
         job("bad", "core", &["/bin/sh", "-c", "exit 7"]),
-        job(
-            "good",
-            "core",
-            &["/bin/sh", "-c", "printf 'out'; printf 'err' >&2"],
-        ),
+        job("good", "core", &["/bin/sh", "-c", "printf 'out'; printf 'err' >&2"]),
         job("later", "parallel", &["/bin/sh", "-c", "printf later"]),
     ];
     let (tx, rx) = mpsc::sync_channel(128);
@@ -110,9 +106,7 @@ fn large_newline_free_output_is_fully_logged() {
     .unwrap();
     let _ = events.join().unwrap();
     assert_eq!(
-        std::fs::metadata(results[0].log_path.as_ref().unwrap())
-            .unwrap()
-            .len(),
+        std::fs::metadata(results[0].log_path.as_ref().unwrap()).unwrap().len(),
         524_288
     );
 }
@@ -189,22 +183,13 @@ fn cancellation_terminates_the_process_group_promptly() {
     let _ = events.join().unwrap();
     assert!(started.elapsed() < Duration::from_secs(3));
     assert_eq!(results[0].status, JobStatus::Cancelled);
-    let pid: i32 = std::fs::read_to_string(descendant_pid)
-        .unwrap()
-        .trim()
-        .parse()
-        .unwrap();
+    let pid: i32 = std::fs::read_to_string(descendant_pid).unwrap().trim().parse().unwrap();
     let stopped = Instant::now();
     loop {
-        if unsafe { libc::kill(pid, 0) } == -1
-            && std::io::Error::last_os_error().raw_os_error() == Some(libc::ESRCH)
-        {
+        if unsafe { libc::kill(pid, 0) } == -1 && std::io::Error::last_os_error().raw_os_error() == Some(libc::ESRCH) {
             break;
         }
-        assert!(
-            stopped.elapsed() < Duration::from_secs(3),
-            "descendant still exists"
-        );
+        assert!(stopped.elapsed() < Duration::from_secs(3), "descendant still exists");
         thread::sleep(Duration::from_millis(20));
     }
 }
@@ -290,16 +275,9 @@ fn logs_are_private_and_cleanup_does_not_follow_symlinks() {
     .unwrap();
     let _ = events.join().unwrap();
     let log = results[0].log_path.as_ref().unwrap();
+    assert_eq!(std::fs::metadata(log).unwrap().permissions().mode() & 0o777, 0o600);
     assert_eq!(
-        std::fs::metadata(log).unwrap().permissions().mode() & 0o777,
-        0o600
-    );
-    assert_eq!(
-        std::fs::metadata(log.parent().unwrap())
-            .unwrap()
-            .permissions()
-            .mode()
-            & 0o777,
+        std::fs::metadata(log.parent().unwrap()).unwrap().permissions().mode() & 0o777,
         0o700
     );
     assert!(target.join("keep").exists());
@@ -310,16 +288,8 @@ fn logs_are_private_and_cleanup_does_not_follow_symlinks() {
 fn every_result_emits_one_finished_event_including_spawn_failures() {
     let home = tempfile::tempdir().unwrap();
     let jobs = vec![
-        job(
-            "core-failure",
-            "core",
-            &["/sup-fixture-command-does-not-exist"],
-        ),
-        job(
-            "parallel-failure",
-            "parallel",
-            &["/sup-fixture-command-does-not-exist"],
-        ),
+        job("core-failure", "core", &["/sup-fixture-command-does-not-exist"]),
+        job("parallel-failure", "parallel", &["/sup-fixture-command-does-not-exist"]),
         job("success", "parallel", &["/bin/sh", "-c", "exit 0"]),
     ];
     let (tx, rx) = mpsc::sync_channel(128);

@@ -118,8 +118,8 @@ pub fn run(
     if jobs.is_empty() {
         return Ok(Vec::new());
     }
-    let run_dir = logs::create_run_dir(&options.home)
-        .map_err(|error| format!("cannot create run directory: {error}"))?;
+    let run_dir =
+        logs::create_run_dir(&options.home).map_err(|error| format!("cannot create run directory: {error}"))?;
     let _ = events.send(RunEvent::RunDirectory(run_dir.clone()));
     if options.cleanup_logs {
         logs::cleanup_old_runs(&options.home, &run_dir, options.retention_days)
@@ -128,11 +128,7 @@ pub fn run(
 
     let auth = AuthSession::new(jobs, auth_requests, cancellation.clone())?;
     let mut results = vec![None; jobs.len()];
-    for (index, job) in jobs
-        .iter()
-        .enumerate()
-        .filter(|(_, job)| job.phase == "core")
-    {
+    for (index, job) in jobs.iter().enumerate().filter(|(_, job)| job.phase == "core") {
         let result = if cancellation.is_cancelled() {
             cancelled(job, "run cancelled")
         } else {
@@ -147,11 +143,7 @@ pub fn run(
     }
 
     let mut prepared = Vec::new();
-    for (index, job) in jobs
-        .iter()
-        .enumerate()
-        .filter(|(_, job)| job.phase == "parallel")
-    {
+    for (index, job) in jobs.iter().enumerate().filter(|(_, job)| job.phase == "parallel") {
         let result = if cancellation.is_cancelled() {
             Some(cancelled(job, "run cancelled"))
         } else {
@@ -188,13 +180,7 @@ pub fn run(
         }
         for (index, job, worker) in workers {
             results[index] = Some(worker.join().unwrap_or_else(|_| {
-                let result = failed(
-                    job,
-                    "parallel job worker panicked",
-                    None,
-                    None,
-                    Duration::ZERO,
-                );
+                let result = failed(job, "parallel job worker panicked", None, None, Duration::ZERO);
                 let _ = events.send(RunEvent::Finished(Box::new(result.clone())));
                 result
             }));
@@ -206,10 +192,7 @@ pub fn run(
 pub fn exit_code(results: &[JobResult], cancellation: &Cancellation) -> i32 {
     if cancellation.is_cancelled() {
         130
-    } else if results
-        .iter()
-        .any(|result| result.status == JobStatus::Failed)
-    {
+    } else if results.iter().any(|result| result.status == JobStatus::Failed) {
         1
     } else {
         0
@@ -218,9 +201,7 @@ pub fn exit_code(results: &[JobResult], cancellation: &Cancellation) -> i32 {
 
 pub fn displayed_command(job: &Job) -> Vec<String> {
     let mut command = job.command.clone();
-    if command
-        .first()
-        .is_some_and(|value| value == "sup-rust-update")
+    if command.first().is_some_and(|value| value == "sup-rust-update")
         && let Ok(executable) = std::env::current_exe()
     {
         command[0] = executable
@@ -233,11 +214,7 @@ pub fn displayed_command(job: &Job) -> Vec<String> {
     command
 }
 
-fn prepare(
-    job: &Job,
-    run_dir: &Path,
-    cancellation: &Cancellation,
-) -> Result<Option<(PathBuf, File)>, Box<JobResult>> {
+fn prepare(job: &Job, run_dir: &Path, cancellation: &Cancellation) -> Result<Option<(PathBuf, File)>, Box<JobResult>> {
     let mut missing = Vec::new();
     for variable in &job.required_env {
         if std::env::var_os(variable).is_none_or(|value| value.is_empty()) {
@@ -377,9 +354,7 @@ fn execute(
             );
         }
     };
-    command
-        .stdout(Stdio::from(writer))
-        .stderr(Stdio::from(stderr_writer));
+    command.stdout(Stdio::from(writer)).stderr(Stdio::from(stderr_writer));
     #[cfg(unix)]
     use std::os::unix::process::CommandExt;
     #[cfg(unix)]
@@ -405,8 +380,7 @@ fn execute(
     let reader_log = log.clone();
     let reader_job = job.name.clone();
     let reader_events = events.clone();
-    let reader_thread =
-        thread::spawn(move || read_output(&mut reader, reader_log, reader_job, reader_events));
+    let reader_thread = thread::spawn(move || read_output(&mut reader, reader_log, reader_job, reader_events));
 
     let mut exit_code = None;
     let mut failure = None;
@@ -447,9 +421,7 @@ fn execute(
             if libc::WIFSTOPPED(status) {
                 let signal = libc::WSTOPSIG(status);
                 if signal == libc::SIGTTIN || signal == libc::SIGTTOU {
-                    failure = Some(
-                        "job needs terminal input; interactive child input is unsupported".into(),
-                    );
+                    failure = Some("job needs terminal input; interactive child input is unsupported".into());
                     unsafe {
                         libc::kill(-pid, libc::SIGCONT);
                         libc::kill(-pid, libc::SIGTERM);
@@ -576,13 +548,7 @@ fn read_output<R: Read>(
                     let text = std::str::from_utf8(&display_pending[..valid])
                         .expect("valid UTF-8 prefix")
                         .to_owned();
-                    if events
-                        .send(RunEvent::Output {
-                            job: job.clone(),
-                            text,
-                        })
-                        .is_err()
-                    {
+                    if events.send(RunEvent::Output { job: job.clone(), text }).is_err() {
                         return Ok(());
                     }
                     display_pending.drain(..valid);
@@ -590,13 +556,7 @@ fn read_output<R: Read>(
             }
             Err(_) => {
                 let text = String::from_utf8_lossy(&display_pending).into_owned();
-                if events
-                    .send(RunEvent::Output {
-                        job: job.clone(),
-                        text,
-                    })
-                    .is_err()
-                {
+                if events.send(RunEvent::Output { job: job.clone(), text }).is_err() {
                     return Ok(());
                 }
                 display_pending.clear();
@@ -608,12 +568,9 @@ fn read_output<R: Read>(
 fn resolved_command(job: &Job) -> Result<Vec<String>, String> {
     let mut command = job.command.clone();
     if command[0] == "sup-rust-update" {
-        let executable = std::env::current_exe()
-            .map_err(|error| format!("cannot resolve current executable: {error}"))?;
-        let helper = executable
-            .parent()
-            .unwrap_or(Path::new("."))
-            .join("sup-rust-update");
+        let executable =
+            std::env::current_exe().map_err(|error| format!("cannot resolve current executable: {error}"))?;
+        let helper = executable.parent().unwrap_or(Path::new(".")).join("sup-rust-update");
         if !helper.is_file() {
             return Err("sup-rust-update helper is missing; build or install all binaries".into());
         }
@@ -626,17 +583,10 @@ fn command_exists(command: &str) -> bool {
     if command.contains('/') {
         return Path::new(command).is_file();
     }
-    std::env::var_os("PATH")
-        .is_some_and(|paths| std::env::split_paths(&paths).any(|path| path.join(command).is_file()))
+    std::env::var_os("PATH").is_some_and(|paths| std::env::split_paths(&paths).any(|path| path.join(command).is_file()))
 }
 
-fn failed(
-    job: &Job,
-    reason: &str,
-    exit_code: Option<i32>,
-    log_path: Option<PathBuf>,
-    elapsed: Duration,
-) -> JobResult {
+fn failed(job: &Job, reason: &str, exit_code: Option<i32>, log_path: Option<PathBuf>, elapsed: Duration) -> JobResult {
     JobResult {
         job: job.clone(),
         status: JobStatus::Failed,

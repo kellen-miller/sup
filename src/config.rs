@@ -170,10 +170,7 @@ fn default_version() -> u32 {
     1
 }
 
-pub fn resolve_path(
-    explicit: Option<&Path>,
-    environ: &HashMap<String, String>,
-) -> Result<(PathBuf, bool), String> {
+pub fn resolve_path(explicit: Option<&Path>, environ: &HashMap<String, String>) -> Result<(PathBuf, bool), String> {
     if let Some(path) = explicit {
         return Ok((path.to_path_buf(), true));
     }
@@ -191,11 +188,7 @@ pub fn resolve_path(
     Ok((base.join("sup/config.toml"), false))
 }
 
-pub fn load(
-    path: Option<&Path>,
-    home: &Path,
-    environ: &HashMap<String, String>,
-) -> Result<LoadedConfig, String> {
+pub fn load(path: Option<&Path>, home: &Path, environ: &HashMap<String, String>) -> Result<LoadedConfig, String> {
     let (resolved, explicit) = resolve_path(path, environ)?;
     let (text, source) = match fs::read_to_string(&resolved) {
         Ok(text) => (text, resolved.display().to_string()),
@@ -203,14 +196,10 @@ pub fn load(
             (DEFAULT_CONFIG.to_owned(), "embedded defaults".to_owned())
         }
         Err(error) => {
-            return Err(format!(
-                "cannot read config {}: {error}",
-                resolved.display()
-            ));
+            return Err(format!("cannot read config {}: {error}", resolved.display()));
         }
     };
-    let raw: Config = toml::from_str(&text)
-        .map_err(|error| format!("invalid TOML config {}: {error}", source))?;
+    let raw: Config = toml::from_str(&text).map_err(|error| format!("invalid TOML config {}: {error}", source))?;
     normalize(raw, home, environ, source)
 }
 
@@ -221,10 +210,7 @@ pub fn normalize(
     source: String,
 ) -> Result<LoadedConfig, String> {
     if raw.version != 1 {
-        return Err(format!(
-            "unsupported config version {}; expected 1",
-            raw.version
-        ));
+        return Err(format!("unsupported config version {}; expected 1", raw.version));
     }
     if raw.jobs.is_empty() {
         return Err("config must contain at least one job".into());
@@ -242,20 +228,14 @@ pub fn normalize(
             return Err(format!("duplicate job name: {}", job.name));
         }
         if !matches!(job.phase.as_str(), "core" | "parallel") {
-            return Err(format!(
-                "job {} has invalid phase {:?}",
-                job.name, job.phase
-            ));
+            return Err(format!("job {} has invalid phase {:?}", job.name, job.phase));
         }
         if job.command.is_empty() || job.command[0].is_empty() {
             return Err(format!("job {} command must be a non-empty argv", job.name));
         }
         let log_name = job.log_name.unwrap_or_else(|| format!("{}.log", job.name));
         if !valid_filename(&log_name) {
-            return Err(format!(
-                "job {} log_name must be a simple filename",
-                job.name
-            ));
+            return Err(format!("job {} log_name must be a simple filename", job.name));
         }
         if !logs.insert(log_name.clone()) {
             return Err(format!("duplicate log filename: {log_name}"));
@@ -264,11 +244,7 @@ pub fn normalize(
             name: job.name.clone(),
             label: job.label.unwrap_or(job.name),
             phase: job.phase,
-            command: job
-                .command
-                .iter()
-                .map(|v| expand(v, &expanded_env))
-                .collect(),
+            command: job.command.iter().map(|v| expand(v, &expanded_env)).collect(),
             required_commands: job.required_commands,
             required_paths: job
                 .required_paths
@@ -312,8 +288,8 @@ pub fn migrate_yaml(
         duplicate_keys: serde_saphyr::DuplicateKeyPolicy::Error,
         reject_unsupported_tags: true,
     };
-    let legacy: LegacyConfig = serde_saphyr::from_str_with_options(text, options)
-        .map_err(|error| format!("invalid legacy YAML: {error}"))?;
+    let legacy: LegacyConfig =
+        serde_saphyr::from_str_with_options(text, options).map_err(|error| format!("invalid legacy YAML: {error}"))?;
     let mut notices = Vec::new();
     let mut jobs = Vec::new();
     for job in legacy.jobs {
@@ -328,7 +304,10 @@ pub fn migrate_yaml(
             } else if preflight {
                 auth = AuthMode::Preflight;
                 if job.command.iter().any(|part| part.contains("brew")) {
-                    notices.push(format!("job {} uses a shell wrapper with preflight; use on-demand if it invokes Homebrew", job.name));
+                    notices.push(format!(
+                        "job {} uses a shell wrapper with preflight; use on-demand if it invokes Homebrew",
+                        job.name
+                    ));
                 }
             } else {
                 auth = AuthMode::None;
@@ -354,8 +333,7 @@ pub fn migrate_yaml(
         jobs,
     };
     normalize(raw.clone(), home, environ, "migration input".into())?;
-    let serialized =
-        toml::to_string_pretty(&raw).map_err(|error| format!("cannot encode TOML: {error}"))?;
+    let serialized = toml::to_string_pretty(&raw).map_err(|error| format!("cannot encode TOML: {error}"))?;
     Ok((serialized, notices))
 }
 
@@ -396,10 +374,7 @@ pub fn selectors(
 }
 
 fn valid_name(value: &str) -> bool {
-    !value.is_empty()
-        && value
-            .chars()
-            .all(|c| c.is_ascii_alphanumeric() || "-_".contains(c))
+    !value.is_empty() && value.chars().all(|c| c.is_ascii_alphanumeric() || "-_".contains(c))
 }
 fn valid_filename(value: &str) -> bool {
     !value.is_empty()
@@ -416,10 +391,7 @@ fn direct_brew_mutation(command: &[String]) -> bool {
     let Some(exe) = command.first() else {
         return false;
     };
-    let basename = Path::new(exe)
-        .file_name()
-        .and_then(|s| s.to_str())
-        .unwrap_or(exe);
+    let basename = Path::new(exe).file_name().and_then(|s| s.to_str()).unwrap_or(exe);
     basename == "brew"
         && command
             .get(1)
@@ -466,11 +438,7 @@ fn expand(value: &str, vars: &HashMap<String, String>) -> String {
             }
         };
         if let Some(name) = name {
-            out.push_str(
-                vars.get(name)
-                    .map(String::as_str)
-                    .unwrap_or(&value[start..end]),
-            );
+            out.push_str(vars.get(name).map(String::as_str).unwrap_or(&value[start..end]));
             i = end;
         } else {
             out.push('$');
@@ -481,8 +449,6 @@ fn expand(value: &str, vars: &HashMap<String, String>) -> String {
 }
 fn valid_var(name: &str) -> bool {
     let mut chars = name.chars();
-    chars
-        .next()
-        .is_some_and(|c| c == '_' || c.is_ascii_alphabetic())
+    chars.next().is_some_and(|c| c == '_' || c.is_ascii_alphabetic())
         && chars.all(|c| c == '_' || c.is_ascii_alphanumeric())
 }

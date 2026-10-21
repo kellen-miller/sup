@@ -16,10 +16,7 @@ fn concurrent_first_runs_create_shared_cache_parents_safely() {
             })
         })
         .collect();
-    let paths: HashSet<_> = workers
-        .into_iter()
-        .map(|worker| worker.join().unwrap())
-        .collect();
+    let paths: HashSet<_> = workers.into_iter().map(|worker| worker.join().unwrap()).collect();
     assert_eq!(paths.len(), 24);
     assert!(paths.iter().all(|path| path.is_dir()));
 }

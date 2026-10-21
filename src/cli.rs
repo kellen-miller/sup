@@ -62,9 +62,7 @@ where
     I: IntoIterator<Item = T>,
     T: Into<std::ffi::OsString> + Clone,
 {
-    let cli = match Cli::try_parse_from(
-        std::iter::once("sup".into()).chain(args.into_iter().map(Into::into)),
-    ) {
+    let cli = match Cli::try_parse_from(std::iter::once("sup".into()).chain(args.into_iter().map(Into::into))) {
         Ok(cli) => cli,
         Err(error) => {
             let code = error.exit_code();
@@ -152,17 +150,10 @@ where
             let (auth_tx, auth_rx) = std::sync::mpsc::sync_channel(8);
             let worker_cancel = cancellation.clone();
             let worker_jobs = selected.clone();
-            let worker = std::thread::spawn(move || {
-                runner::run(&worker_jobs, options, events_tx, auth_tx, worker_cancel)
-            });
+            let worker =
+                std::thread::spawn(move || runner::run(&worker_jobs, options, events_tx, auth_tx, worker_cancel));
             let displayed = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                display::run(
-                    &selected,
-                    events_rx,
-                    auth_rx,
-                    cancellation.clone(),
-                    cli.no_tui,
-                )
+                display::run(&selected, events_rx, auth_rx, cancellation.clone(), cli.no_tui)
             }))
             .unwrap_or_else(|_| Err("dashboard panicked".to_owned()));
             if displayed.is_err() {
@@ -195,14 +186,12 @@ where
 }
 
 fn direct_brew(command: &[String]) -> bool {
-    command.first().is_some_and(|exe| {
-        std::path::Path::new(exe)
-            .file_name()
-            .and_then(|s| s.to_str())
-            == Some("brew")
-    }) && command
-        .get(1)
-        .is_some_and(|arg| matches!(arg.as_str(), "install" | "upgrade" | "reinstall"))
+    command
+        .first()
+        .is_some_and(|exe| std::path::Path::new(exe).file_name().and_then(|s| s.to_str()) == Some("brew"))
+        && command
+            .get(1)
+            .is_some_and(|arg| matches!(arg.as_str(), "install" | "upgrade" | "reinstall"))
 }
 
 fn create_exclusive(path: &PathBuf, bytes: &[u8]) -> i32 {
@@ -221,10 +210,7 @@ fn create_exclusive(path: &PathBuf, bytes: &[u8]) -> i32 {
     let mut file = match OpenOptions::new().write(true).create_new(true).open(&temp) {
         Ok(file) => file,
         Err(error) => {
-            eprintln!(
-                "sup: cannot create temporary output for {}: {error}",
-                path.display()
-            );
+            eprintln!("sup: cannot create temporary output for {}: {error}", path.display());
             return 2;
         }
     };
@@ -234,10 +220,7 @@ fn create_exclusive(path: &PathBuf, bytes: &[u8]) -> i32 {
         .and_then(|()| fs::hard_link(&temp, path))
     {
         let _ = fs::remove_file(&temp);
-        eprintln!(
-            "sup: cannot publish {} without overwriting: {error}",
-            path.display()
-        );
+        eprintln!("sup: cannot publish {} without overwriting: {error}", path.display());
         return 2;
     }
     if let Err(error) = fs::remove_file(&temp) {
@@ -252,12 +235,7 @@ fn create_exclusive(path: &PathBuf, bytes: &[u8]) -> i32 {
     0
 }
 
-fn migrate(
-    from: &PathBuf,
-    to: &PathBuf,
-    home: &std::path::Path,
-    env: &HashMap<String, String>,
-) -> i32 {
+fn migrate(from: &PathBuf, to: &PathBuf, home: &std::path::Path, env: &HashMap<String, String>) -> i32 {
     if from == to {
         eprintln!("sup: migration input and output must be different paths");
         return 2;

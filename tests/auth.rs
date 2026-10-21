@@ -110,10 +110,7 @@ impl Fixture {
         if let Ok(coordinates) = fs::read_to_string(self.root().join("coordinates")) {
             let socket = Path::new(coordinates.lines().next().unwrap());
             assert!(!socket.exists(), "socket leaked");
-            assert!(
-                !socket.parent().unwrap().exists(),
-                "private directory leaked"
-            );
+            assert!(!socket.parent().unwrap().exists(), "private directory leaked");
         }
     }
 }
@@ -124,9 +121,7 @@ fn executable(path: &Path, text: &str) {
 }
 
 fn job(name: &str, auth: &str, command: &str) -> String {
-    format!(
-        "[[jobs]]\nname = '{name}'\nphase = 'core'\nauth = '{auth}'\noptional = false\ncommand = {command}\n"
-    )
+    format!("[[jobs]]\nname = '{name}'\nphase = 'core'\nauth = '{auth}'\noptional = false\ncommand = {command}\n")
 }
 
 struct PtyRun {
@@ -182,10 +177,7 @@ impl PtyRun {
         let master = unsafe { File::from_raw_fd(master) };
         let observer = unsafe { File::from_raw_fd(slave) };
         for descriptor in [master.as_raw_fd(), observer.as_raw_fd()] {
-            assert_ne!(
-                unsafe { libc::fcntl(descriptor, libc::F_SETFD, libc::FD_CLOEXEC) },
-                -1
-            );
+            assert_ne!(unsafe { libc::fcntl(descriptor, libc::F_SETFD, libc::FD_CLOEXEC) }, -1);
         }
 
         assert_ne!(
@@ -238,12 +230,7 @@ impl PtyRun {
             // Drain output and retry partial/nonblocking writes under the test deadline.
             self.read();
             assert!(Instant::now() < deadline, "PTY input stalled");
-            match self
-                .master
-                .as_mut()
-                .unwrap()
-                .write(&bytes[..bytes.len().min(64)])
-            {
+            match self.master.as_mut().unwrap().write(&bytes[..bytes.len().min(64)]) {
                 Ok(0) => panic!("PTY input closed"),
                 Ok(count) => bytes = &bytes[count..],
                 Err(error)
@@ -265,11 +252,7 @@ impl PtyRun {
             self.read();
             if String::from_utf8_lossy(&self.output).contains("(Escape cancels):") {
                 let mode = nix::sys::termios::tcgetattr(self.observer.as_ref().unwrap()).unwrap();
-                assert!(
-                    !mode
-                        .local_flags
-                        .contains(nix::sys::termios::LocalFlags::ECHO)
-                );
+                assert!(!mode.local_flags.contains(nix::sys::termios::LocalFlags::ECHO));
                 return;
             }
             assert!(
@@ -292,11 +275,7 @@ impl PtyRun {
             self.read();
             if String::from_utf8_lossy(&self.output).contains("Password:") {
                 let mode = nix::sys::termios::tcgetattr(self.observer.as_ref().unwrap()).unwrap();
-                assert!(
-                    !mode
-                        .local_flags
-                        .contains(nix::sys::termios::LocalFlags::ECHO)
-                );
+                assert!(!mode.local_flags.contains(nix::sys::termios::LocalFlags::ECHO));
                 return;
             }
             assert!(
@@ -323,11 +302,7 @@ impl PtyRun {
             let output = String::from_utf8_lossy(&self.output);
             if !submitted && output.contains("Password:") {
                 let mode = nix::sys::termios::tcgetattr(self.observer.as_ref().unwrap()).unwrap();
-                assert!(
-                    !mode
-                        .local_flags
-                        .contains(nix::sys::termios::LocalFlags::ECHO)
-                );
+                assert!(!mode.local_flags.contains(nix::sys::termios::LocalFlags::ECHO));
                 if !resized {
                     let size = libc::winsize {
                         ws_row: 30,
@@ -336,13 +311,7 @@ impl PtyRun {
                         ws_ypixel: 0,
                     };
                     assert_eq!(
-                        unsafe {
-                            libc::ioctl(
-                                self.master.as_ref().unwrap().as_raw_fd(),
-                                libc::TIOCSWINSZ,
-                                &size,
-                            )
-                        },
+                        unsafe { libc::ioctl(self.master.as_ref().unwrap().as_raw_fd(), libc::TIOCSWINSZ, &size,) },
                         0
                     );
                     resized = true;
@@ -444,10 +413,7 @@ impl Drop for PtyRun {
         if self.child.try_wait().ok().flatten().is_none() {
             // Exact fixture-owned groups cover descendants after their parent exits.
             let groups = fs::read_to_string(self.root.join("job-groups")).unwrap_or_default();
-            for group in groups
-                .lines()
-                .filter_map(|line| line.trim().parse::<i32>().ok())
-            {
+            for group in groups.lines().filter_map(|line| line.trim().parse::<i32>().ok()) {
                 if group > 0 {
                     unsafe {
                         libc::kill(-group, libc::SIGCONT);
@@ -488,10 +454,7 @@ struct TerminalSettings {
 impl TerminalSettings {
     fn read(terminal: &File) -> Self {
         let mut mode = std::mem::MaybeUninit::<libc::termios>::uninit();
-        assert_eq!(
-            unsafe { libc::tcgetattr(terminal.as_raw_fd(), mode.as_mut_ptr()) },
-            0
-        );
+        assert_eq!(unsafe { libc::tcgetattr(terminal.as_raw_fd(), mode.as_mut_ptr()) }, 0);
         let mode = unsafe { mode.assume_init() };
         Self {
             input: mode.c_iflag,
@@ -568,10 +531,7 @@ fn prompt_timeout_panic_cleans_and_reaps_owned_processes() {
             -1,
             "fixture process {pid} survived cleanup"
         );
-        assert_eq!(
-            std::io::Error::last_os_error().raw_os_error(),
-            Some(libc::ESRCH)
-        );
+        assert_eq!(std::io::Error::last_os_error().raw_os_error(), Some(libc::ESRCH));
     }
 
     fixture.assert_socket_removed();
@@ -587,10 +547,7 @@ fn cli_homebrew_reset_prompts_on_demand_without_preflight_or_secret_echo() {
     let status = run.finish(&[SECRET], Duration::from_secs(5));
     assert!(status.success(), "{}", String::from_utf8_lossy(&run.output));
     let trace = fixture.trace();
-    assert!(
-        trace.starts_with("brew-start\nreset\nsudo -A -v"),
-        "{trace}"
-    );
+    assert!(trace.starts_with("brew-start\nreset\nsudo -A -v"), "{trace}");
     assert_eq!(trace.matches("askpass\n").count(), 1, "{trace}");
     assert_eq!(trace.matches("sudo -n -v").count(), 1, "{trace}");
     assert!(
@@ -611,10 +568,7 @@ fn dashboard_password_modal_masks_input_resizes_and_restores_terminal() {
     let fixture = Fixture::new();
     fixture.jobs(&job("brew", "on-demand", "['brew']"));
     let mut run = PtyRun::spawn(fixture.ui_command());
-    assert!(
-        run.finish_tui_prompt(SECRET, Duration::from_secs(5))
-            .success()
-    );
+    assert!(run.finish_tui_prompt(SECRET, Duration::from_secs(5)).success());
     assert!(String::from_utf8_lossy(&run.output).contains("fixture-brew-complete"));
     fixture.assert_no_secret(&run.output);
     fixture.assert_socket_removed();
@@ -656,19 +610,14 @@ fn noninteractive_on_demand_runs_without_sudo_but_actual_request_fails() {
 #[test]
 fn preflight_is_just_in_time_and_noninteractive_unavailable_optional_jobs_skip() {
     let fixture = Fixture::new();
-    fixture.jobs(&job(
-        "preflight",
-        "preflight",
-        "['/bin/echo', 'authorized-command']",
-    ));
+    fixture.jobs(&job("preflight", "preflight", "['/bin/echo', 'authorized-command']"));
     let mut run = PtyRun::spawn(fixture.command());
     assert!(run.finish(&[SECRET], Duration::from_secs(5)).success());
     assert!(fixture.trace().starts_with("sudo -A -v"));
     assert!(String::from_utf8_lossy(&run.output).contains("authorized-command"));
     // Fresh no-tty scope cannot reuse the PTY ticket.
     fixture.jobs(
-        &job("optional", "preflight", "['/bin/echo', 'must-not-run']")
-            .replace("optional = false", "optional = true"),
+        &job("optional", "preflight", "['/bin/echo', 'must-not-run']").replace("optional = false", "optional = true"),
     );
     let output = bounded_output(fixture.command());
     assert!(output.status.success());
@@ -680,18 +629,18 @@ fn preflight_is_just_in_time_and_noninteractive_unavailable_optional_jobs_skip()
         String::from_utf8_lossy(&output.stderr)
     );
     assert!(!String::from_utf8_lossy(&output.stdout).contains("must-not-run"));
-    fixture.jobs(&job(
-        "required",
-        "preflight",
-        "['/bin/echo', 'must-not-run']",
-    ));
+    fixture.jobs(&job("required", "preflight", "['/bin/echo', 'must-not-run']"));
     assert_eq!(bounded_output(fixture.command()).status.code(), Some(1));
 }
 
 #[test]
 fn scrubbed_broker_environment_fails_promptly_with_attributed_bootstrap_error() {
     let fixture = Fixture::new();
-    fixture.jobs(&job("scrubber", "on-demand", "['/bin/sh', '-c', '/usr/bin/env -i SUDO_ASKPASS=\"$SUDO_ASKPASS\" \"$SUDO_ASKPASS\" Password:']"));
+    fixture.jobs(&job(
+        "scrubber",
+        "on-demand",
+        "['/bin/sh', '-c', '/usr/bin/env -i SUDO_ASKPASS=\"$SUDO_ASKPASS\" \"$SUDO_ASKPASS\" Password:']",
+    ));
     let output = bounded_output(fixture.command());
     assert_eq!(output.status.code(), Some(1));
     let text = String::from_utf8_lossy(&output.stdout);
@@ -705,11 +654,7 @@ fn standalone_sup_explicitly_rejects_missing_sibling_before_any_auth_job() {
     let fixture = Fixture::new();
     let copy = fixture.bin.join("sup");
     fs::copy(env!("CARGO_BIN_EXE_sup"), &copy).unwrap();
-    fixture.jobs(&job(
-        "guarded",
-        "on-demand",
-        "['/bin/echo', 'must-not-run']",
-    ));
+    fixture.jobs(&job("guarded", "on-demand", "['/bin/echo', 'must-not-run']"));
     let command = fixture.command();
     // Reconstruct the same isolated invocation with the copied executable.
     let mut copied = Command::new(copy);
@@ -743,16 +688,9 @@ fn long_tmpdir_uses_private_short_socket_and_cleans_it() {
     let socket = Path::new(coordinates.lines().next().unwrap());
     assert!(socket.starts_with("/tmp"));
     assert!(socket.as_os_str().as_encoded_bytes().len() < 104);
+    assert_eq!(fs::metadata(socket).unwrap().permissions().mode() & 0o777, 0o600);
     assert_eq!(
-        fs::metadata(socket).unwrap().permissions().mode() & 0o777,
-        0o600
-    );
-    assert_eq!(
-        fs::metadata(socket.parent().unwrap())
-            .unwrap()
-            .permissions()
-            .mode()
-            & 0o777,
+        fs::metadata(socket.parent().unwrap()).unwrap().permissions().mode() & 0o777,
         0o700
     );
     assert!(run.finish(&[SECRET], Duration::from_secs(5)).success());
@@ -761,9 +699,7 @@ fn long_tmpdir_uses_private_short_socket_and_cleans_it() {
 
 fn rejected_request(socket: &Path, token: &str) {
     let mut stream = UnixStream::connect(socket).unwrap();
-    stream
-        .set_read_timeout(Some(Duration::from_secs(2)))
-        .unwrap();
+    stream.set_read_timeout(Some(Duration::from_secs(2))).unwrap();
     let mut frame = b"SUPA1".to_vec();
     frame.extend_from_slice(token.as_bytes());
     frame.extend_from_slice(&0_u16.to_be_bytes());
@@ -782,10 +718,8 @@ fn rejected_request(socket: &Path, token: &str) {
 #[test]
 fn unknown_and_stale_tokens_are_rejected_and_stuck_clients_have_deadlines() {
     let fixture = Fixture::new();
-    fixture.jobs(
-        &(job("sudo", "on-demand", "['sudo', '-A', '-v']")
-            + &job("hold", "on-demand", "['/bin/sleep', '1.8']")),
-    );
+    fixture
+        .jobs(&(job("sudo", "on-demand", "['sudo', '-A', '-v']") + &job("hold", "on-demand", "['/bin/sleep', '1.8']")));
     let mut run = PtyRun::spawn(fixture.command());
     run.until_prompt();
     let coordinates = fs::read_to_string(fixture.root().join("coordinates")).unwrap();
@@ -795,9 +729,7 @@ fn unknown_and_stale_tokens_are_rejected_and_stuck_clients_have_deadlines() {
     rejected_request(socket, &"a".repeat(64));
     let mut stuck = UnixStream::connect(socket).unwrap();
     stuck.write_all(b"SUP").unwrap();
-    stuck
-        .set_read_timeout(Some(Duration::from_secs(2)))
-        .unwrap();
+    stuck.set_read_timeout(Some(Duration::from_secs(2))).unwrap();
     run.input(SECRET, Instant::now() + Duration::from_secs(5));
     let deadline = Instant::now() + Duration::from_secs(3);
     loop {
@@ -823,21 +755,14 @@ fn escape_permanently_revokes_job_and_terminates_its_process_group() {
     let mut command = fixture.command();
     command.env("FIXTURE_CANCEL_RETRY", "yes");
     let mut run = PtyRun::spawn(command);
-    assert_eq!(
-        run.finish(&[b"\x1b"], Duration::from_secs(5)).code(),
-        Some(1)
-    );
+    assert_eq!(run.finish(&[b"\x1b"], Duration::from_secs(5)).code(), Some(1));
     assert_eq!(
         String::from_utf8_lossy(&run.output)
             .matches("(Escape cancels):")
             .count(),
         1
     );
-    assert!(
-        fixture.trace().contains("later-denied=1"),
-        "{}",
-        fixture.trace()
-    );
+    assert!(fixture.trace().contains("later-denied=1"), "{}", fixture.trace());
     fixture.assert_socket_removed();
 }
 
@@ -852,15 +777,8 @@ fn cancelled_descendant_request_is_reaped_after_its_parent_exits() {
     let mut command = fixture.command();
     command.env("FIXTURE_CANCEL_RETRY", "yes");
     let mut run = PtyRun::spawn(command);
-    assert_eq!(
-        run.finish(&[b"\x1b"], Duration::from_secs(3)).code(),
-        Some(1)
-    );
-    assert!(
-        fixture.trace().contains("later-denied=1"),
-        "{}",
-        fixture.trace()
-    );
+    assert_eq!(run.finish(&[b"\x1b"], Duration::from_secs(3)).code(), Some(1));
+    assert!(fixture.trace().contains("later-denied=1"), "{}", fixture.trace());
     fixture.assert_socket_removed();
 }
 
@@ -870,11 +788,7 @@ fn terminal_signals_restore_plain_prompt_and_dashboard() {
         for signal in [libc::SIGINT, libc::SIGTERM, libc::SIGHUP, libc::SIGQUIT] {
             let fixture = Fixture::new();
             fixture.jobs(&job("sudo", "on-demand", "['sudo', '-A', '-v']"));
-            let command = if tui {
-                fixture.ui_command()
-            } else {
-                fixture.command()
-            };
+            let command = if tui { fixture.ui_command() } else { fixture.command() };
             let mut run = PtyRun::spawn(command);
             if tui {
                 run.until_tui_prompt();
@@ -891,10 +805,7 @@ fn terminal_signals_restore_plain_prompt_and_dashboard() {
             if tui {
                 let output = String::from_utf8_lossy(&run.output);
                 assert!(output.contains("\x1b[?25h"), "cursor was not restored");
-                assert!(
-                    output.contains("\x1b[?1049l"),
-                    "alternate screen was not restored"
-                );
+                assert!(output.contains("\x1b[?1049l"), "alternate screen was not restored");
             }
             fixture.assert_socket_removed();
         }
@@ -906,17 +817,10 @@ fn failed_ticket_probe_does_not_repeat_without_new_authentication() {
     let fixture = Fixture::new();
     fixture.jobs(&job("brew", "on-demand", "['brew']"));
     let mut command = fixture.command();
-    command
-        .env("FIXTURE_PROBE", "fail")
-        .env("FIXTURE_DURATION", "1.5");
+    command.env("FIXTURE_PROBE", "fail").env("FIXTURE_DURATION", "1.5");
     let mut run = PtyRun::spawn(command);
     assert!(run.finish(&[SECRET], Duration::from_secs(5)).success());
-    assert_eq!(
-        fixture.trace().matches("sudo -n -v").count(),
-        1,
-        "{}",
-        fixture.trace()
-    );
+    assert_eq!(fixture.trace().matches("sudo -n -v").count(), 1, "{}", fixture.trace());
 }
 
 #[test]
@@ -925,9 +829,7 @@ fn probe_timeout_and_cancellation_reap_the_probe_process_group() {
         let fixture = Fixture::new();
         fixture.jobs(&job("brew", "on-demand", "['brew']"));
         let mut command = fixture.command();
-        command
-            .env("FIXTURE_PROBE", "hang")
-            .env("FIXTURE_DURATION", "3");
+        command.env("FIXTURE_PROBE", "hang").env("FIXTURE_DURATION", "3");
         let mut run = PtyRun::spawn(command);
         run.until_prompt();
         run.input(SECRET, Instant::now() + Duration::from_secs(5));
@@ -950,16 +852,9 @@ fn probe_timeout_and_cancellation_reap_the_probe_process_group() {
 
         let status = run.finish(&[], Duration::from_secs(5));
         assert_eq!(status.code(), Some(if cancel { 130 } else { 0 }));
-        let pid: i32 = fs::read_to_string(pid_file)
-            .unwrap()
-            .trim()
-            .parse()
-            .unwrap();
+        let pid: i32 = fs::read_to_string(pid_file).unwrap().trim().parse().unwrap();
         assert_eq!(unsafe { libc::kill(pid, 0) }, -1, "probe survived");
-        assert_eq!(
-            std::io::Error::last_os_error().raw_os_error(),
-            Some(libc::ESRCH)
-        );
+        assert_eq!(std::io::Error::last_os_error().raw_os_error(), Some(libc::ESRCH));
         assert_eq!(fixture.trace().matches("sudo -n -v").count(), 1);
         fixture.assert_socket_removed();
     }
@@ -970,18 +865,11 @@ fn refresh_runs_at_thirty_seconds_and_stops_after_failure_during_privileged_work
     let fixture = Fixture::new();
     fixture.jobs(&job("brew", "on-demand", "['brew']"));
     let mut command = fixture.command();
-    command
-        .env("FIXTURE_REFRESH", "fail")
-        .env("FIXTURE_DURATION", "62");
+    command.env("FIXTURE_REFRESH", "fail").env("FIXTURE_DURATION", "62");
     let mut run = PtyRun::spawn(command);
     assert!(run.finish(&[SECRET], Duration::from_secs(67)).success());
     // Exactly one delayed probe and one failed 30-second refresh. No subsequent polling.
-    assert_eq!(
-        fixture.trace().matches("sudo -n -v").count(),
-        2,
-        "{}",
-        fixture.trace()
-    );
+    assert_eq!(fixture.trace().matches("sudo -n -v").count(), 2, "{}", fixture.trace());
     assert!(
         fixture
             .trace()
@@ -996,42 +884,23 @@ fn parent_scoped_ticket_cannot_be_preserved_by_sup_probe() {
     let fixture = Fixture::new();
     fixture.jobs(&job("brew", "on-demand", "['brew']"));
     let mut command = fixture.command();
-    command
-        .env("FIXTURE_SCOPE", "parent")
-        .env("FIXTURE_EXPIRE", "yes");
+    command.env("FIXTURE_SCOPE", "parent").env("FIXTURE_EXPIRE", "yes");
     let mut run = PtyRun::spawn(command);
-    assert!(
-        run.finish(&[SECRET, SECRET], Duration::from_secs(5))
-            .success()
-    );
-    assert_eq!(
-        fixture.trace().matches("askpass\n").count(),
-        2,
-        "{}",
-        fixture.trace()
-    );
-    assert!(
-        fixture.trace().contains("probe-ticket=absent"),
-        "{}",
-        fixture.trace()
-    );
+    assert!(run.finish(&[SECRET, SECRET], Duration::from_secs(5)).success());
+    assert_eq!(fixture.trace().matches("askpass\n").count(), 2, "{}", fixture.trace());
+    assert!(fixture.trace().contains("probe-ticket=absent"), "{}", fixture.trace());
 }
 
 #[test]
 fn simultaneous_jobs_serialize_real_dialogs_without_sharing_secret_replies() {
     let fixture = Fixture::new();
-    let first = job("one", "on-demand", "['sudo', '-A', '-v']")
-        .replace("phase = 'core'", "phase = 'parallel'");
-    let second = job("two", "on-demand", "['sudo', '-A', '-v']")
-        .replace("phase = 'core'", "phase = 'parallel'");
+    let first = job("one", "on-demand", "['sudo', '-A', '-v']").replace("phase = 'core'", "phase = 'parallel'");
+    let second = job("two", "on-demand", "['sudo', '-A', '-v']").replace("phase = 'core'", "phase = 'parallel'");
     fixture.jobs(&(first + &second));
     let mut command = fixture.command();
     command.env("FIXTURE_ALWAYS_PROMPT", "yes");
     let mut run = PtyRun::spawn(command);
-    assert!(
-        run.finish(&[SECRET, SECRET], Duration::from_secs(5))
-            .success()
-    );
+    assert!(run.finish(&[SECRET, SECRET], Duration::from_secs(5)).success());
     let output = String::from_utf8_lossy(&run.output);
     assert_eq!(output.matches("(Escape cancels):").count(), 2, "{output}");
     assert!(output.contains("[one] Password:"), "{output}");
@@ -1043,17 +912,11 @@ fn simultaneous_jobs_serialize_real_dialogs_without_sharing_secret_replies() {
 fn refresh_is_disarmed_when_only_unrelated_work_remains() {
     let fixture = Fixture::new();
     fixture.jobs(
-        &(job("preflight", "preflight", "['/bin/echo', 'ready']")
-            + &job("unrelated", "none", "['/bin/sleep', '31']")),
+        &(job("preflight", "preflight", "['/bin/echo', 'ready']") + &job("unrelated", "none", "['/bin/sleep', '31']")),
     );
     let mut run = PtyRun::spawn(fixture.command());
     assert!(run.finish(&[SECRET], Duration::from_secs(36)).success());
-    assert_eq!(
-        fixture.trace().matches("sudo -n -v").count(),
-        0,
-        "{}",
-        fixture.trace()
-    );
+    assert_eq!(fixture.trace().matches("sudo -n -v").count(), 0, "{}", fixture.trace());
 }
 
 #[test]

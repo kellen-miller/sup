@@ -32,20 +32,11 @@ fn tall_dashboard_shows_more_than_ten_recent_records_at_bottom() {
         .unwrap();
     let buffer = terminal.backend().buffer();
     let rows: Vec<String> = (0..60)
-        .map(|row| {
-            (0..120)
-                .map(|column| buffer[(column, row)].symbol())
-                .collect()
-        })
+        .map(|row| (0..120).map(|column| buffer[(column, row)].symbol()).collect())
         .collect();
     let shown: Vec<_> = rows.iter().filter(|row| row.contains("record-")).collect();
     assert!(shown.len() > 10, "visible output rows: {}", shown.len());
-    assert!(
-        rows.iter()
-            .rev()
-            .take(3)
-            .any(|row| row.contains("record-29"))
-    );
+    assert!(rows.iter().rev().take(3).any(|row| row.contains("record-29")));
     assert!(rows[59].contains("End follow"));
 }
 
@@ -54,28 +45,16 @@ fn history_caps_each_event_and_preserves_follow_and_scroll_anchor() {
     let mut dashboard = Dashboard::default();
     dashboard.push("job", &format!("{}\n", "x".repeat(20 * 1024)));
     dashboard.finish_job("job");
-    assert!(
-        dashboard
-            .records()
-            .back()
-            .unwrap()
-            .text
-            .contains("event truncated")
-    );
+    assert!(dashboard.records().back().unwrap().text.contains("event truncated"));
     for index in 0..20 {
         dashboard.push("job", &format!("line-{index}\n"));
     }
     dashboard.scroll(-3);
-    let anchor = dashboard.records()[dashboard.records().len() - 4]
-        .text
-        .clone();
+    let anchor = dashboard.records()[dashboard.records().len() - 4].text.clone();
     dashboard.push("job", "new output");
     dashboard.finish_job("job");
     assert!(!dashboard.is_following());
-    assert_eq!(
-        dashboard.records()[dashboard.records().len() - 5].text,
-        anchor
-    );
+    assert_eq!(dashboard.records()[dashboard.records().len() - 5].text, anchor);
     dashboard.resume();
     assert!(dashboard.is_following());
 }
@@ -102,11 +81,7 @@ fn partial_progress_is_visible_before_the_job_finishes() {
         .unwrap();
     let buffer = terminal.backend().buffer();
     let screen = (0..18)
-        .map(|row| {
-            (0..80)
-                .map(|column| buffer[(column, row)].symbol())
-                .collect::<String>()
-        })
+        .map(|row| (0..80).map(|column| buffer[(column, row)].symbol()).collect::<String>())
         .collect::<String>();
     assert!(screen.contains("progress 20%"));
 }
@@ -125,14 +100,7 @@ fn tiny_dimensions_render_without_panicking() {
     for (width, height) in [(1, 1), (4, 3), (12, 8), (80, 18), (120, 24)] {
         let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
         terminal
-            .draw(|frame| {
-                sup::display::render(
-                    frame,
-                    &Dashboard::default(),
-                    &[job("build")],
-                    &HashMap::new(),
-                )
-            })
+            .draw(|frame| sup::display::render(frame, &Dashboard::default(), &[job("build")], &HashMap::new()))
             .unwrap();
     }
 }
