@@ -48,6 +48,8 @@ impl Password {
         }
     }
 
+    /// # Errors
+    /// Rejects overflow and bytes that would corrupt line-oriented authentication input.
     pub fn push(&mut self, byte: u8) -> Result<(), &'static str> {
         if self.used == SECRET_CAPACITY || matches!(byte, 0 | b'\r' | b'\n') {
             return Err("password is too long or contains a line break");
@@ -90,7 +92,11 @@ pub struct PasswordResponder {
 
 impl PasswordResponder {
     pub fn respond(self, reply: PasswordReply) {
-        let _ = self.sender.try_send(reply);
+        if let Err(mpsc::TrySendError::Full(reply) | mpsc::TrySendError::Disconnected(reply)) =
+            self.sender.try_send(reply)
+        {
+            drop(reply);
+        }
     }
 }
 
@@ -142,6 +148,8 @@ pub struct JobAuthorization {
 }
 
 impl AuthSession {
+    /// # Errors
+    /// Returns an error when the askpass helper or private broker cannot be prepared.
     pub fn new(
         jobs: &[Job],
         requests: mpsc::SyncSender<AuthRequest>,
@@ -174,112 +182,11 @@ impl AuthSession {
         }
 
         disable_core_dumps()?;
-        let temporary_root = std::env::temp_dir();
-        let temporary_root = if temporary_root.is_absolute() {
-            temporary_root
-        } else {
-            std::env::current_dir()
-                .map_err(|error| error.to_string())?
-                .join(temporary_root)
-        };
-        let mut directory = tempfile::Builder::new()
-            .prefix("sa-")
-            .tempdir_in(temporary_root)
-            .map_err(|error| format!("cannot create auth directory: {error}"))?;
-        // Darwin sockaddr_un.sun_path is 104 bytes, including its trailing NUL.
-        if directory.path().join("s").as_os_str().as_encoded_bytes().len() >= 104 {
-            directory = tempfile::Builder::new()
-                .prefix("sa-")
-                .tempdir_in("/tmp")
-                .map_err(|error| format!("cannot create short auth directory: {error}"))?;
-        }
-
-        fs::set_permissions(directory.path(), fs::Permissions::from_mode(0o700))
-            .map_err(|error| format!("cannot secure auth directory: {error}"))?;
-        let socket = directory.path().join("s");
-        let listener = UnixListener::bind(&socket).map_err(|error| format!("cannot bind auth socket: {error}"))?;
-        fs::set_permissions(&socket, fs::Permissions::from_mode(0o600))
-            .map_err(|error| format!("cannot secure auth socket: {error}"))?;
-        listener.set_nonblocking(true).map_err(|e| e.to_string())?;
+        let (directory, socket, listener) = create_broker_socket()?;
         let state = Arc::new(Mutex::new(BrokerState::default()));
         let stopped = Arc::new(AtomicBool::new(false));
-        let broker_state = state.clone();
-        let broker_stop = stopped.clone();
-        let broker_cancel = cancellation.clone();
-        let broker = thread::spawn(move || {
-            let ids = Arc::new(AtomicU64::new(1));
-            let dialog = Arc::new(Mutex::new(()));
-            let mut clients: Vec<JoinHandle<()>> = Vec::new();
-            while !broker_stop.load(Ordering::SeqCst) && !broker_cancel.is_cancelled() {
-                let mut index = 0;
-                while index < clients.len() {
-                    if clients[index].is_finished() {
-                        let _ = clients.swap_remove(index).join();
-                    } else {
-                        index += 1;
-                    }
-                }
-
-                match listener.accept() {
-                    Ok((stream, _)) if clients.len() < 8 => {
-                        let context = BrokerConnection {
-                            io: SocketIo {
-                                stream,
-                                deadline: Instant::now() + IO_TIMEOUT,
-                                stopped: broker_stop.clone(),
-                                cancellation: broker_cancel.clone(),
-                            },
-                            state: broker_state.clone(),
-                            dialog: dialog.clone(),
-                            requests: requests.clone(),
-                            ids: ids.clone(),
-                        };
-                        clients.push(thread::spawn(move || {
-                            let _ = context.respond();
-                        }));
-                    }
-                    Ok(_) => {} // Connection limit: close immediately.
-                    Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
-                        thread::sleep(Duration::from_millis(10));
-                    }
-                    Err(_) => break,
-                }
-            }
-
-            broker_stop.store(true, Ordering::SeqCst);
-            for client in clients {
-                let _ = client.join();
-            }
-        });
-        let refresh_state = state.clone();
-        let refresh_stop = stopped.clone();
-        let refresh = thread::spawn(move || {
-            while !refresh_stop.load(Ordering::SeqCst) && !cancellation.is_cancelled() {
-                let due = {
-                    let state = refresh_state.lock().unwrap_or_else(|e| e.into_inner());
-                    let due = state.probe_due.or(state.refresh_due);
-                    due.filter(|due| *due <= Instant::now()).map(|_| state.generation)
-                };
-                if let Some(generation) = due {
-                    // A delivered password is only a reason to probe; it is not a ticket.
-                    let success = sudo_status(
-                        &["-n", "-v"],
-                        None,
-                        &refresh_state,
-                        &refresh_stop,
-                        &cancellation,
-                        SUDO_TIMEOUT,
-                    );
-                    let mut state = refresh_state.lock().unwrap_or_else(|e| e.into_inner());
-                    if state.generation == generation {
-                        state.probe_due = None;
-                        state.refresh_due = success.then(|| Instant::now() + REFRESH_INTERVAL);
-                    }
-                }
-
-                thread::sleep(Duration::from_millis(20));
-            }
-        });
+        let broker = start_broker(listener, state.clone(), stopped.clone(), requests, cancellation.clone());
+        let refresh = start_refresh(state.clone(), stopped.clone(), cancellation);
         Ok(Self {
             directory: Some(directory),
             socket,
@@ -291,6 +198,8 @@ impl AuthSession {
         })
     }
 
+    /// # Errors
+    /// Returns an error when privileged jobs have no broker or a secure token cannot be made.
     pub fn register(&self, job: &Job) -> Result<JobAuthorization, String> {
         let mut authorization = JobAuthorization {
             token: None,
@@ -343,18 +252,127 @@ impl AuthSession {
     }
 }
 
+fn create_broker_socket() -> Result<(TempDir, PathBuf, UnixListener), String> {
+    let temporary_root = std::env::temp_dir();
+    let temporary_root = if temporary_root.is_absolute() {
+        temporary_root
+    } else {
+        std::env::current_dir()
+            .map_err(|error| error.to_string())?
+            .join(temporary_root)
+    };
+    let mut directory = tempfile::Builder::new()
+        .prefix("sa-")
+        .tempdir_in(temporary_root)
+        .map_err(|error| format!("cannot create auth directory: {error}"))?;
+    // Darwin sockaddr_un.sun_path is 104 bytes, including its trailing NUL.
+    if directory.path().join("s").as_os_str().as_encoded_bytes().len() >= 104 {
+        directory = tempfile::Builder::new()
+            .prefix("sa-")
+            .tempdir_in("/tmp")
+            .map_err(|error| format!("cannot create short auth directory: {error}"))?;
+    }
+
+    fs::set_permissions(directory.path(), fs::Permissions::from_mode(0o700))
+        .map_err(|error| format!("cannot secure auth directory: {error}"))?;
+    let socket = directory.path().join("s");
+    let listener = UnixListener::bind(&socket).map_err(|error| format!("cannot bind auth socket: {error}"))?;
+    fs::set_permissions(&socket, fs::Permissions::from_mode(0o600))
+        .map_err(|error| format!("cannot secure auth socket: {error}"))?;
+    listener.set_nonblocking(true).map_err(|error| error.to_string())?;
+    Ok((directory, socket, listener))
+}
+
+fn start_broker(
+    listener: UnixListener,
+    state: Arc<Mutex<BrokerState>>,
+    stopped: Arc<AtomicBool>,
+    requests: mpsc::SyncSender<AuthRequest>,
+    cancellation: Cancellation,
+) -> JoinHandle<()> {
+    thread::spawn(move || {
+        let ids = Arc::new(AtomicU64::new(1));
+        let dialog = Arc::new(Mutex::new(()));
+        let mut clients: Vec<JoinHandle<()>> = Vec::new();
+        while !stopped.load(Ordering::SeqCst) && !cancellation.is_cancelled() {
+            reap_finished_clients(&mut clients);
+            match listener.accept() {
+                Ok((stream, _)) if clients.len() < 8 => {
+                    let connection = BrokerConnection {
+                        io: SocketIo {
+                            stream,
+                            deadline: Instant::now() + IO_TIMEOUT,
+                            stopped: stopped.clone(),
+                            cancellation: cancellation.clone(),
+                        },
+                        state: state.clone(),
+                        dialog: dialog.clone(),
+                        requests: requests.clone(),
+                        ids: ids.clone(),
+                    };
+                    clients.push(thread::spawn(move || drop(connection.respond())));
+                }
+                Ok(_) => {} // Connection limit: close immediately.
+                Err(error) if error.kind() == io::ErrorKind::WouldBlock => thread::sleep(Duration::from_millis(10)),
+                Err(_) => break,
+            }
+        }
+
+        stopped.store(true, Ordering::SeqCst);
+        for client in clients {
+            drop(client.join());
+        }
+    })
+}
+
+fn reap_finished_clients(clients: &mut Vec<JoinHandle<()>>) {
+    let mut index = 0;
+    while index < clients.len() {
+        if clients[index].is_finished() {
+            drop(clients.swap_remove(index).join());
+        } else {
+            index += 1;
+        }
+    }
+}
+
+fn start_refresh(
+    state: Arc<Mutex<BrokerState>>,
+    stopped: Arc<AtomicBool>,
+    cancellation: Cancellation,
+) -> JoinHandle<()> {
+    thread::spawn(move || {
+        while !stopped.load(Ordering::SeqCst) && !cancellation.is_cancelled() {
+            let due = {
+                let state = state.lock().unwrap_or_else(|error| error.into_inner());
+                let due = state.probe_due.or(state.refresh_due);
+                due.filter(|due| *due <= Instant::now()).map(|_| state.generation)
+            };
+            if let Some(generation) = due {
+                let success = sudo_status(&["-n", "-v"], None, &state, &stopped, &cancellation, SUDO_TIMEOUT);
+                let mut broker = state.lock().unwrap_or_else(|error| error.into_inner());
+                if broker.generation == generation {
+                    broker.probe_due = None;
+                    broker.refresh_due = success.then(|| Instant::now() + REFRESH_INTERVAL);
+                }
+            }
+            thread::sleep(Duration::from_millis(20));
+        }
+    })
+}
+
 impl Drop for AuthSession {
     fn drop(&mut self) {
         self.stopped.store(true, Ordering::SeqCst);
         if let Some(broker) = self.broker.take() {
-            let _ = broker.join();
+            drop(broker.join());
         }
 
         if let Some(refresh) = self.refresh.take() {
-            let _ = refresh.join();
+            drop(refresh.join());
         }
 
-        let _ = fs::remove_file(&self.socket);
+        drop(fs::remove_file(&self.socket));
         // TempDir removes the private directory even during unwinding.
         self.directory.take();
     }
@@ -412,6 +430,16 @@ struct BrokerConnection {
 
 impl BrokerConnection {
     fn respond(mut self) -> io::Result<()> {
+        self.authenticate_peer()?;
+        let (token, name, mut prompt) = self.read_request()?;
+        let dialog = Arc::clone(&self.dialog);
+        let _dialog = acquire_dialog(&dialog, &self.io, &self.state, &token)?;
+        let outcome = self.request_password(token, name, &prompt);
+        prompt.zeroize();
+        outcome
+    }
+
+    fn authenticate_peer(&self) -> io::Result<()> {
         self.io.stream.set_nonblocking(true)?;
         #[cfg(target_os = "macos")]
         let uid = nix::unistd::getpeereid(&self.io.stream).map_err(io::Error::other)?.0;
@@ -424,7 +452,10 @@ impl BrokerConnection {
         if uid != nix::unistd::getuid() {
             return Err(io::Error::other("auth peer rejected"));
         }
+        Ok(())
+    }
 
+    fn read_request(&mut self) -> io::Result<(String, String, Vec<u8>)> {
         let mut header = [0; 71];
         self.io.read_exact(&mut header)?;
         if &header[..5] != b"SUPA1" {
@@ -455,25 +486,16 @@ impl BrokerConnection {
         let mut prompt = vec![0; length];
         self.io.read_exact(&mut prompt)?;
         self.io.deadline = Instant::now() + DIALOG_TIMEOUT;
-        // Waiting for another dialog is cancellable and bounded too.
-        let _dialog = loop {
-            self.io.check()?;
-            if !self.job_active(&token) || self.io.disconnected() {
-                return Err(io::Error::other("auth job ended"));
-            }
+        Ok((token, name, prompt))
+    }
 
-            if let Ok(dialog) = self.dialog.try_lock() {
-                break dialog;
-            }
-
-            thread::sleep(Duration::from_millis(20));
-        };
+    fn request_password(&mut self, token: String, name: String, prompt: &[u8]) -> io::Result<()> {
         let (reply, receiver) = mpsc::sync_channel(1);
         let active = Arc::new(AtomicBool::new(true));
         let request = AuthRequest {
             request_id: self.ids.fetch_add(1, Ordering::SeqCst),
             registered_job: name,
-            sanitized_prompt: sanitize_prompt(&prompt),
+            sanitized_prompt: sanitize_prompt(prompt),
             one_use_reply: PasswordResponder { sender: reply },
             deadline: self.io.deadline,
             active: active.clone(),
@@ -491,28 +513,7 @@ impl BrokerConnection {
                 }
 
                 match receiver.recv_timeout(Duration::from_millis(20)) {
-                    Ok(PasswordReply::Submit(password)) => {
-                        // Serialize the final authorization check with token revocation.
-                        // The write is bounded, and no secret enters shared state.
-                        let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
-                        if !state.jobs.get(&token).is_some_and(|job| job.cancelled.is_none()) {
-                            break Err(io::Error::other("auth job ended"));
-                        }
-
-                        self.io.deadline = Instant::now() + IO_TIMEOUT;
-                        let length = (password.used as u16).to_be_bytes();
-                        let result = self
-                            .io
-                            .write_all(&[1, length[0], length[1]])
-                            .and_then(|()| self.io.write_all(password.as_bytes()));
-                        if result.is_ok() {
-                            state.generation += 1;
-                            state.probe_due = Some(Instant::now() + PROBE_DELAY);
-                            state.refresh_due = None;
-                        }
-
-                        break result;
-                    }
+                    Ok(PasswordReply::Submit(password)) => break self.deliver_password(&token, password),
                     Ok(PasswordReply::Cancel) | Err(mpsc::RecvTimeoutError::Disconnected) => {
                         break Err(io::Error::other("authentication cancelled"));
                     }
@@ -531,6 +532,25 @@ impl BrokerConnection {
         outcome
     }
 
+    fn deliver_password(&mut self, token: &str, password: Password) -> io::Result<()> {
+        // Serialize authorization with revocation; the bounded write never stores the secret.
+        let mut state = self.state.lock().unwrap_or_else(|error| error.into_inner());
+        if !state.jobs.get(token).is_some_and(|job| job.cancelled.is_none()) {
+            drop(password);
+            return Err(io::Error::other("auth job ended"));
+        }
+
+        self.io.deadline = Instant::now() + IO_TIMEOUT;
+        let length = (password.used as u16).to_be_bytes();
+        self.io
+            .write_all(&[1, length[0], length[1]])
+            .and_then(|()| self.io.write_all(password.as_bytes()))?;
+        state.generation += 1;
+        state.probe_due = Some(Instant::now() + PROBE_DELAY);
+        state.refresh_due = None;
+        Ok(())
+    }
+
     fn job_active(&self, token: &str) -> bool {
         self.state
             .lock()
@@ -539,6 +559,36 @@ impl BrokerConnection {
             .get(token)
             .is_some_and(|job| job.cancelled.is_none())
     }
+}
+
+fn acquire_dialog<'a>(
+    dialog: &'a Mutex<()>,
+    io: &SocketIo,
+    state: &Mutex<BrokerState>,
+    token: &str,
+) -> io::Result<std::sync::MutexGuard<'a, ()>> {
+    // Waiting for another dialog is cancellable and bounded too.
+    loop {
+        io.check()?;
+        if !job_is_active(state, token) || io.disconnected() {
+            return Err(io::Error::other("auth job ended"));
+        }
+
+        if let Ok(guard) = dialog.try_lock() {
+            return Ok(guard);
+        }
+
+        thread::sleep(Duration::from_millis(20));
+    }
+}
+
+fn job_is_active(state: &Mutex<BrokerState>, token: &str) -> bool {
+    state
+        .lock()
+        .unwrap_or_else(|error| error.into_inner())
+        .jobs
+        .get(token)
+        .is_some_and(|job| job.cancelled.is_none())
 }
 
 struct SocketIo {
@@ -563,6 +613,7 @@ impl SocketIo {
             events: libc::POLLIN,
             revents: 0,
         };
+        // SAFETY: The poll descriptor points to the live Unix stream owned by this value.
         unsafe {
             libc::poll(&mut fd, 1, 0);
         }
@@ -650,6 +701,8 @@ fn sanitize_prompt(bytes: &[u8]) -> String {
 }
 
 /// Askpass entry point: its stdout contains only the current supplied password.
+/// # Errors
+/// Returns an error when broker coordinates, communication, or password delivery fail.
 pub fn askpass(prompt: &str) -> Result<(), String> {
     disable_core_dumps()?;
     let socket =
@@ -672,6 +725,7 @@ pub fn askpass(prompt: &str) -> Result<(), String> {
     stream
         .set_nonblocking(true)
         .map_err(|_| "cannot configure auth socket")?;
+    // SAFETY: The descriptor is a valid Unix stream descriptor owned by `stream`.
     if unsafe { libc::fcntl(stream.as_raw_fd(), libc::F_SETFD, libc::FD_CLOEXEC) } == -1 {
         return Err("cannot secure auth socket".into());
     }
@@ -762,6 +816,19 @@ fn sudo_status(
     let pid = child.id() as i32;
     drop(child);
     cancellation.register(pid);
+    let success = monitor_sudo(pid, authorization, state, stopped, cancellation, timeout);
+    cancellation.unregister(pid);
+    success
+}
+
+fn monitor_sudo(
+    pid: i32,
+    authorization: Option<&JobAuthorization>,
+    state: &Mutex<BrokerState>,
+    stopped: &AtomicBool,
+    cancellation: &Cancellation,
+    timeout: Duration,
+) -> bool {
     let deadline = Instant::now() + timeout;
     let mut terminate_at = None;
     let mut success = false;
@@ -773,6 +840,7 @@ fn sudo_status(
             || no_jobs
             || authorization.is_some_and(|authorization| authorization.failure().is_some());
         if (cancelled || Instant::now() >= deadline) && terminate_at.is_none() {
+            // SAFETY: `pid` is the process-group id assigned by `CommandExt::process_group(0)`.
             unsafe {
                 libc::kill(-pid, libc::SIGCONT);
                 libc::kill(-pid, libc::SIGTERM);
@@ -784,6 +852,7 @@ fn sudo_status(
         let waited = if reaped {
             0
         } else {
+            // SAFETY: This function owns and reaps the child identified by `pid`.
             unsafe { libc::waitpid(pid, &mut status, libc::WNOHANG | libc::WUNTRACED) }
         };
         if waited == pid {
@@ -791,6 +860,7 @@ fn sudo_status(
                 reaped = true;
                 success = terminate_at.is_none() && libc::WIFEXITED(status) && libc::WEXITSTATUS(status) == 0;
             } else if libc::WIFSTOPPED(status) {
+                // SAFETY: Resume the stopped child group identified by the owned `pid`.
                 unsafe {
                     libc::kill(-pid, libc::SIGCONT);
                     libc::kill(-pid, libc::SIGTERM);
@@ -802,6 +872,7 @@ fn sudo_status(
         }
 
         if terminate_at.is_some_and(|at| Instant::now() >= at) {
+            // SAFETY: `pid` remains the process-group id until the child is reaped.
             unsafe {
                 libc::kill(-pid, libc::SIGKILL);
             }
@@ -817,7 +888,6 @@ fn sudo_status(
         thread::sleep(Duration::from_millis(10));
     }
 
-    cancellation.unregister(pid);
     success
 }
 
@@ -880,6 +950,7 @@ impl PlainPrompt {
                 events: libc::POLLIN,
                 revents: 0,
             };
+            // SAFETY: `fd` points to the live tty descriptor and is valid for this poll call.
             let ready = unsafe { libc::poll(&mut fd, 1, 20) };
             if ready == -1 {
                 if io::Error::last_os_error().kind() == io::ErrorKind::Interrupted {
@@ -922,8 +993,14 @@ struct PromptTerminal<'a> {
 
 impl Drop for PromptTerminal<'_> {
     fn drop(&mut self) {
-        let _ = nix::sys::termios::tcflush(&*self.tty, nix::sys::termios::FlushArg::TCIFLUSH);
-        let _ = nix::sys::termios::tcsetattr(&*self.tty, nix::sys::termios::SetArg::TCSANOW, &self.original);
-        let _ = writeln!(self.tty);
+        if nix::sys::termios::tcflush(&*self.tty, nix::sys::termios::FlushArg::TCIFLUSH).is_err() {
+            // Restoration continues even when flushing an already-closed tty fails.
+        }
+        if nix::sys::termios::tcsetattr(&*self.tty, nix::sys::termios::SetArg::TCSANOW, &self.original).is_err() {
+            // This is the last restoration attempt during Drop.
+        }
+        if writeln!(self.tty).is_err() {
+            // A closed tty cannot accept the visual newline.
+        }
     }
 }

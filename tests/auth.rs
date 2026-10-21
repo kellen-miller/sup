@@ -1,3 +1,5 @@
+#![cfg(test)]
+
 use std::fs::{self, File};
 use std::io::{Read, Write};
 use std::os::fd::{AsRawFd, FromRawFd};
@@ -146,7 +148,10 @@ impl PtyRun {
         // The shell keeps the controlling terminal alive while recording restoration.
         let mut owner = Command::new("/bin/sh");
         for marker in ["terminal-ready", "terminal-release"] {
-            let _ = fs::remove_file(root.join(marker));
+            let path = root.join(marker);
+            if path.exists() {
+                fs::remove_file(path).expect("remove stale terminal marker");
+            }
         }
 
         owner.args(["-c", "trap '' INT HUP QUIT; \"$@\" < /dev/tty & pid=$!; echo $pid > \"$FIXTURE_ROOT/sup-pid\"; wait $pid; status=$?; : > \"$FIXTURE_ROOT/terminal-ready\"; while [ ! -f \"$FIXTURE_ROOT/terminal-release\" ]; do /bin/sleep 0.01; done; exit $status", "pty-owner"])
@@ -163,6 +168,7 @@ impl PtyRun {
             ws_ypixel: 0,
         };
         assert_eq!(
+            // SAFETY: `openpty` initializes both descriptors and receives a valid winsize pointer.
             unsafe {
                 libc::openpty(
                     &mut master,
@@ -174,13 +180,17 @@ impl PtyRun {
             },
             0
         );
+        // SAFETY: `openpty` returned each owned descriptor exactly once.
         let master = unsafe { File::from_raw_fd(master) };
+        // SAFETY: `openpty` returned each owned descriptor exactly once.
         let observer = unsafe { File::from_raw_fd(slave) };
         for descriptor in [master.as_raw_fd(), observer.as_raw_fd()] {
+            // SAFETY: `descriptor` is an open descriptor owned by one of these Files.
             assert_ne!(unsafe { libc::fcntl(descriptor, libc::F_SETFD, libc::FD_CLOEXEC) }, -1);
         }
 
         assert_ne!(
+            // SAFETY: The master descriptor is open and owned by `master`.
             unsafe { libc::fcntl(master.as_raw_fd(), libc::F_SETFL, libc::O_NONBLOCK) },
             -1
         );
@@ -188,6 +198,7 @@ impl PtyRun {
             .stdin(Stdio::from(observer.try_clone().unwrap()))
             .stdout(Stdio::from(observer.try_clone().unwrap()))
             .stderr(Stdio::from(observer.try_clone().unwrap()));
+        // SAFETY: `pre_exec` performs only async-signal-safe libc calls before exec.
         unsafe {
             command.pre_exec(|| {
                 if libc::setsid() == -1
@@ -311,6 +322,7 @@ impl PtyRun {
                         ws_ypixel: 0,
                     };
                     assert_eq!(
+                        // SAFETY: The master PTY descriptor is open and `size` is initialized.
                         unsafe { libc::ioctl(self.master.as_ref().unwrap().as_raw_fd(), libc::TIOCSWINSZ, &size,) },
                         0
                     );
@@ -399,11 +411,12 @@ impl Drop for PtyRun {
             .ok()
             .and_then(|pid| pid.trim().parse::<i32>().ok())
             .unwrap_or(self.child.id() as i32);
+        // SAFETY: `pid` is the process ID read from this fixture's child marker.
         unsafe {
             libc::kill(pid, libc::SIGTERM);
         }
 
-        let _ = fs::write(self.root.join("terminal-release"), "");
+        fs::write(self.root.join("terminal-release"), "").expect("release fixture terminal owner");
         let deadline = Instant::now() + Duration::from_secs(2);
         while self.child.try_wait().ok().flatten().is_none() && Instant::now() < deadline {
             self.read();
@@ -415,6 +428,7 @@ impl Drop for PtyRun {
             let groups = fs::read_to_string(self.root.join("job-groups")).unwrap_or_default();
             for group in groups.lines().filter_map(|line| line.trim().parse::<i32>().ok()) {
                 if group > 0 {
+                    // SAFETY: Each group ID came from this fixture's synthetic job record.
                     unsafe {
                         libc::kill(-group, libc::SIGCONT);
                         libc::kill(-group, libc::SIGKILL);
@@ -433,8 +447,14 @@ impl Drop for PtyRun {
         // Reap only after releasing these resources, including during panic cleanup.
         self.master.take();
         self.observer.take();
-        let _ = self.child.kill();
-        let _ = self.child.wait();
+        if let Err(error) = self.child.kill() {
+            assert_eq!(
+                error.kind(),
+                std::io::ErrorKind::InvalidInput,
+                "cannot terminate fixture owner"
+            );
+        }
+        self.child.wait().expect("reap fixture terminal owner");
     }
 }
 
@@ -454,7 +474,9 @@ struct TerminalSettings {
 impl TerminalSettings {
     fn read(terminal: &File) -> Self {
         let mut mode = std::mem::MaybeUninit::<libc::termios>::uninit();
+        // SAFETY: `terminal` is open and `mode` points to writable termios storage.
         assert_eq!(unsafe { libc::tcgetattr(terminal.as_raw_fd(), mode.as_mut_ptr()) }, 0);
+        // SAFETY: `tcgetattr` succeeded and initialized `mode`.
         let mode = unsafe { mode.assume_init() };
         Self {
             input: mode.c_iflag,
@@ -464,7 +486,9 @@ impl TerminalSettings {
             // All echo/canonical/signal flags and every control character remain checked.
             local: mode.c_lflag & !libc::PENDIN,
             characters: mode.c_cc,
+            // SAFETY: `mode` is initialized by the successful `tcgetattr` call above.
             input_speed: unsafe { libc::cfgetispeed(&mode) },
+            // SAFETY: `mode` is initialized by the successful `tcgetattr` call above.
             output_speed: unsafe { libc::cfgetospeed(&mode) },
             #[cfg(target_os = "linux")]
             line: mode.c_line,
@@ -482,12 +506,13 @@ fn bounded_output(mut command: Command) -> Output {
     let deadline = Instant::now() + Duration::from_secs(5);
     while child.try_wait().unwrap().is_none() {
         if Instant::now() >= deadline {
+            // SAFETY: The process group was assigned from this owned child PID.
             unsafe {
                 libc::kill(-(child.id() as i32), libc::SIGCONT);
                 libc::kill(-(child.id() as i32), libc::SIGKILL);
             }
 
-            let _ = child.wait();
+            child.wait().expect("reap timed out fixture child");
             panic!("noninteractive CLI hung");
         }
         thread::sleep(Duration::from_millis(10));
@@ -527,6 +552,7 @@ fn prompt_timeout_panic_cleans_and_reaps_owned_processes() {
     assert!(failure.is_err(), "missing test timeout");
     for pid in [owner, sup] {
         assert_eq!(
+            // SAFETY: `pid` is the fixture-owned process identifier from its marker file.
             unsafe { libc::kill(pid, 0) },
             -1,
             "fixture process {pid} survived cleanup"
@@ -704,7 +730,12 @@ fn rejected_request(socket: &Path, token: &str) {
     frame.extend_from_slice(token.as_bytes());
     frame.extend_from_slice(&0_u16.to_be_bytes());
     // Rejection may race the last write and close/reset immediately.
-    let _ = stream.write_all(&frame);
+    if let Err(error) = stream.write_all(&frame) {
+        assert!(matches!(
+            error.kind(),
+            std::io::ErrorKind::BrokenPipe | std::io::ErrorKind::ConnectionReset
+        ));
+    }
     let mut response = [0; 3];
     match stream.read(&mut response) {
         Ok(count) => assert_eq!(count, 0, "rejected token received a response"),
@@ -800,6 +831,7 @@ fn terminal_signals_restore_plain_prompt_and_dashboard() {
                 .trim()
                 .parse()
                 .unwrap();
+            // SAFETY: `pid` was read from this fixture's process marker.
             assert_eq!(unsafe { libc::kill(pid, signal) }, 0);
             assert_eq!(run.finish(&[], Duration::from_secs(5)).code(), Some(130));
             if tui {
@@ -847,12 +879,14 @@ fn probe_timeout_and_cancellation_reap_the_probe_process_group() {
                 .trim()
                 .parse()
                 .unwrap();
+            // SAFETY: `pid` was read from this fixture's process marker.
             assert_eq!(unsafe { libc::kill(pid, libc::SIGINT) }, 0);
         }
 
         let status = run.finish(&[], Duration::from_secs(5));
         assert_eq!(status.code(), Some(if cancel { 130 } else { 0 }));
         let pid: i32 = fs::read_to_string(pid_file).unwrap().trim().parse().unwrap();
+        // SAFETY: `pid` is the fixture-owned probe process marker.
         assert_eq!(unsafe { libc::kill(pid, 0) }, -1, "probe survived");
         assert_eq!(std::io::Error::last_os_error().raw_os_error(), Some(libc::ESRCH));
         assert_eq!(fixture.trace().matches("sudo -n -v").count(), 1);
