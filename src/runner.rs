@@ -60,7 +60,7 @@ impl Cancellation {
     pub fn new() -> Self {
         SIGNAL_CANCELLED.store(false, Ordering::SeqCst);
         for signal in [libc::SIGINT, libc::SIGTERM, libc::SIGHUP, libc::SIGQUIT] {
-            // The handler only writes an atomic flag; process cleanup stays in the runner.
+            // SAFETY: the handler only stores to an atomic flag; cleanup stays in the runner.
             unsafe {
                 libc::signal(signal, signal_handler as *const () as libc::sighandler_t);
             }
@@ -96,6 +96,7 @@ impl Cancellation {
     fn terminate_groups(&self) {
         let groups = self.active_groups.lock().unwrap_or_else(|e| e.into_inner());
         for pid in groups.iter().copied() {
+            // SAFETY: registered pids are process-group leaders spawned by this runner.
             unsafe {
                 libc::kill(-pid, libc::SIGCONT);
                 libc::kill(-pid, libc::SIGTERM);
@@ -108,6 +109,11 @@ extern "C" fn signal_handler(_: libc::c_int) {
     SIGNAL_CANCELLED.store(true, Ordering::SeqCst);
 }
 
+/// Runs jobs in configured order, executing core jobs before parallel jobs.
+///
+/// # Errors
+///
+/// Returns an error when run-log setup or authentication setup fails.
 pub fn run(
     jobs: &[Job],
     options: RunOptions,
@@ -120,7 +126,7 @@ pub fn run(
     }
     let run_dir =
         logs::create_run_dir(&options.home).map_err(|error| format!("cannot create run directory: {error}"))?;
-    let _ = events.send(RunEvent::RunDirectory(run_dir.clone()));
+    notify(&events, RunEvent::RunDirectory(run_dir.clone()));
     if options.cleanup_logs {
         logs::cleanup_old_runs(&options.home, &run_dir, options.retention_days)
             .map_err(|error| format!("cannot clean old run logs: {error}"))?;
@@ -138,7 +144,7 @@ pub fn run(
                 Err(result) => *result,
             }
         };
-        let _ = events.send(RunEvent::Finished(Box::new(result.clone())));
+        notify(&events, RunEvent::Finished(Box::new(result.clone())));
         results[index] = Some(result);
     }
 
@@ -157,7 +163,7 @@ pub fn run(
             }
         };
         if let Some(result) = result {
-            let _ = events.send(RunEvent::Finished(Box::new(result.clone())));
+            notify(&events, RunEvent::Finished(Box::new(result.clone())));
             results[index] = Some(result);
         }
     }
@@ -173,7 +179,7 @@ pub fn run(
                 job,
                 scope.spawn(move || {
                     let result = execute(job, path, file, &events, auth, &cancellation);
-                    let _ = events.send(RunEvent::Finished(Box::new(result.clone())));
+                    notify(&events, RunEvent::Finished(Box::new(result.clone())));
                     result
                 }),
             ));
@@ -181,12 +187,22 @@ pub fn run(
         for (index, job, worker) in workers {
             results[index] = Some(worker.join().unwrap_or_else(|_| {
                 let result = failed(job, "parallel job worker panicked", None, None, Duration::ZERO);
-                let _ = events.send(RunEvent::Finished(Box::new(result.clone())));
+                notify(&events, RunEvent::Finished(Box::new(result.clone())));
                 result
             }));
         }
     });
     Ok(results.into_iter().flatten().collect())
+}
+
+fn notify(events: &mpsc::SyncSender<RunEvent>, event: RunEvent) -> bool {
+    match events.send(event) {
+        Ok(()) => true,
+        Err(_) => {
+            // The UI may close while jobs are still running; keep execution and log capture alive.
+            false
+        }
+    }
 }
 
 pub fn exit_code(results: &[JobResult], cancellation: &Cancellation) -> i32 {
@@ -262,7 +278,9 @@ fn requirement_result(job: &Job, run_dir: &Path) -> JobResult {
     };
     let log_path = match logs::create_job_log(run_dir, &job.log_name) {
         Ok((path, mut file)) => {
-            let _ = writeln!(file, "{reason}");
+            if let Err(error) = writeln!(file, "{reason}") {
+                eprintln!("sup: cannot write requirement result to {}: {error}", path.display());
+            }
             Some(path)
         }
         Err(_) => None,
@@ -285,63 +303,18 @@ fn execute(
     auth: &AuthSession,
     cancellation: &Cancellation,
 ) -> JobResult {
-    let authorization = match auth.register(job) {
-        Ok(authorization) => authorization,
-        Err(reason) => return failed(job, &reason, Some(1), Some(log_path), Duration::ZERO),
+    let (authorization, resolved) = match authorize_job(job, &log_path, auth, cancellation) {
+        Ok(job) => job,
+        Err(result) => return *result,
     };
-    if job.auth == AuthMode::Preflight && !auth.preflight(&authorization, cancellation) {
-        if cancellation.is_cancelled() {
-            return cancelled(job, "run cancelled during authentication");
-        }
-
-        let mut result = failed(
-            job,
-            "sudo preflight authorization unavailable",
-            Some(1),
-            Some(log_path),
-            Duration::ZERO,
-        );
-        if job.optional {
-            result.status = JobStatus::Skipped;
-        }
-        return result;
-    }
-
-    if cancellation.is_cancelled() {
-        return cancelled(job, "run cancelled before execution");
-    }
-
-    let resolved = match resolved_command(job) {
-        Ok(command) => command,
-        Err(reason) => return failed(job, &reason, Some(1), Some(log_path), Duration::ZERO),
-    };
-    let _ = events.send(RunEvent::Started(job.name.clone()));
+    notify(events, RunEvent::Started(job.name.clone()));
     let mut command = Command::new(&resolved[0]);
     command.args(&resolved[1..]).stdin(Stdio::null());
     authorization.configure(&mut command);
-    let mut descriptors = [-1; 2];
-    if unsafe { libc::pipe(descriptors.as_mut_ptr()) } == -1 {
-        return failed(
-            job,
-            &format!("cannot create output pipe: {}", io::Error::last_os_error()),
-            Some(1),
-            Some(log_path),
-            Duration::ZERO,
-        );
-    }
-    let mut reader = unsafe { File::from_raw_fd(descriptors[0]) };
-    let writer = unsafe { File::from_raw_fd(descriptors[1]) };
-    for fd in [reader.as_raw_fd(), writer.as_raw_fd()] {
-        if unsafe { libc::fcntl(fd, libc::F_SETFD, libc::FD_CLOEXEC) } == -1 {
-            return failed(
-                job,
-                &format!("cannot secure output pipe: {}", io::Error::last_os_error()),
-                Some(1),
-                Some(log_path),
-                Duration::ZERO,
-            );
-        }
-    }
+    let (mut reader, writer) = match output_pipe() {
+        Ok(pipe) => pipe,
+        Err(error) => return failed(job, &error, Some(1), Some(log_path), Duration::ZERO),
+    };
     let stderr_writer = match writer.try_clone() {
         Ok(writer) => writer,
         Err(error) => {
@@ -381,7 +354,119 @@ fn execute(
     let reader_job = job.name.clone();
     let reader_events = events.clone();
     let reader_thread = thread::spawn(move || read_output(&mut reader, reader_log, reader_job, reader_events));
+    let (exit_code, failure) = monitor_child(pid, reader_thread, log.clone(), &authorization, cancellation);
+    cancellation.unregister(pid);
 
+    let elapsed = started.elapsed();
+    if cancellation.is_cancelled() {
+        return JobResult {
+            job: job.clone(),
+            status: JobStatus::Cancelled,
+            exit_code,
+            elapsed,
+            log_path: Some(log_path),
+            reason: "run cancelled".into(),
+        };
+    }
+    if let Some(reason) = failure {
+        return failed(job, &reason, exit_code, Some(log_path), elapsed);
+    }
+    let code = exit_code.unwrap_or(1);
+    JobResult {
+        job: job.clone(),
+        status: if code == 0 {
+            JobStatus::Succeeded
+        } else {
+            JobStatus::Failed
+        },
+        exit_code: Some(code),
+        elapsed,
+        log_path: Some(log_path),
+        reason: String::new(),
+    }
+}
+
+fn authorize_job(
+    job: &Job,
+    log_path: &Path,
+    auth: &AuthSession,
+    cancellation: &Cancellation,
+) -> Result<(crate::auth::JobAuthorization, Vec<String>), Box<JobResult>> {
+    let authorization = match auth.register(job) {
+        Ok(authorization) => authorization,
+        Err(reason) => {
+            return Err(Box::new(failed(
+                job,
+                &reason,
+                Some(1),
+                Some(log_path.to_path_buf()),
+                Duration::ZERO,
+            )));
+        }
+    };
+    if job.auth == AuthMode::Preflight && !auth.preflight(&authorization, cancellation) {
+        if cancellation.is_cancelled() {
+            return Err(Box::new(cancelled(job, "run cancelled during authentication")));
+        }
+
+        let mut result = failed(
+            job,
+            "sudo preflight authorization unavailable",
+            Some(1),
+            Some(log_path.to_path_buf()),
+            Duration::ZERO,
+        );
+        if job.optional {
+            result.status = JobStatus::Skipped;
+        }
+        return Err(Box::new(result));
+    }
+
+    if cancellation.is_cancelled() {
+        return Err(Box::new(cancelled(job, "run cancelled before execution")));
+    }
+
+    let resolved = match resolved_command(job) {
+        Ok(command) => command,
+        Err(reason) => {
+            return Err(Box::new(failed(
+                job,
+                &reason,
+                Some(1),
+                Some(log_path.to_path_buf()),
+                Duration::ZERO,
+            )));
+        }
+    };
+    Ok((authorization, resolved))
+}
+
+fn output_pipe() -> Result<(File, File), String> {
+    let mut descriptors = [-1; 2];
+    // SAFETY: `descriptors` points to two writable integers as required by pipe(2).
+    if unsafe { libc::pipe(descriptors.as_mut_ptr()) } == -1 {
+        return Err(format!("cannot create output pipe: {}", io::Error::last_os_error()));
+    }
+    // SAFETY: pipe(2) initialized each descriptor and ownership transfers to File.
+    let reader = unsafe { File::from_raw_fd(descriptors[0]) };
+    // SAFETY: pipe(2) initialized each descriptor and ownership transfers to File.
+    let writer = unsafe { File::from_raw_fd(descriptors[1]) };
+    for fd in [reader.as_raw_fd(), writer.as_raw_fd()] {
+        // SAFETY: fd is an open descriptor owned by reader or writer.
+        if unsafe { libc::fcntl(fd, libc::F_SETFD, libc::FD_CLOEXEC) } == -1 {
+            return Err(format!("cannot secure output pipe: {}", io::Error::last_os_error()));
+        }
+    }
+    Ok((reader, writer))
+}
+
+fn monitor_child(
+    pid: i32,
+    reader_thread: thread::JoinHandle<Result<(), String>>,
+    log: Arc<Mutex<File>>,
+    authorization: &crate::auth::JobAuthorization,
+    cancellation: &Cancellation,
+) -> (Option<i32>, Option<String>) {
     let mut exit_code = None;
     let mut failure = None;
     let mut terminate_at = None;
@@ -391,11 +476,7 @@ fn execute(
             && failure.is_none()
         {
             failure = Some(reason);
-            unsafe {
-                libc::kill(-pid, libc::SIGCONT);
-                libc::kill(-pid, libc::SIGTERM);
-            }
-
+            terminate_process_group(pid);
             terminate_at = Some(Instant::now() + TERMINATE_AFTER);
         }
 
@@ -403,48 +484,13 @@ fn execute(
             cancellation.terminate_groups();
             terminate_at = Some(Instant::now() + TERMINATE_AFTER);
         }
-        let mut status = 0;
-        let waited = if reaped {
-            0
-        } else {
-            unsafe { libc::waitpid(pid, &mut status, libc::WNOHANG | libc::WUNTRACED) }
-        };
-        if waited == pid {
-            if libc::WIFEXITED(status) {
-                exit_code = Some(libc::WEXITSTATUS(status));
-                reaped = true;
-            }
-            if libc::WIFSIGNALED(status) {
-                exit_code = Some(128 + libc::WTERMSIG(status));
-                reaped = true;
-            }
-            if libc::WIFSTOPPED(status) {
-                let signal = libc::WSTOPSIG(status);
-                if signal == libc::SIGTTIN || signal == libc::SIGTTOU {
-                    failure = Some("job needs terminal input; interactive child input is unsupported".into());
-                    unsafe {
-                        libc::kill(-pid, libc::SIGCONT);
-                        libc::kill(-pid, libc::SIGTERM);
-                    }
-                    terminate_at = Some(Instant::now() + TERMINATE_AFTER);
-                }
-            }
-        } else if waited == -1 {
-            let error = io::Error::last_os_error();
-            if error.raw_os_error() != Some(libc::EINTR) {
-                failure = Some(format!("cannot wait for child: {error}"));
-                unsafe {
-                    libc::kill(-pid, libc::SIGCONT);
-                    libc::kill(-pid, libc::SIGTERM);
-                }
-                terminate_at = Some(Instant::now() + TERMINATE_AFTER);
-                if error.raw_os_error() == Some(libc::ECHILD) {
-                    reaped = true;
-                    exit_code = Some(1);
-                }
-            }
+        if let Some(reason) = poll_child(pid, &mut reaped, &mut exit_code) {
+            failure.get_or_insert(reason);
+            terminate_process_group(pid);
+            terminate_at = Some(Instant::now() + TERMINATE_AFTER);
         }
         if terminate_at.is_some_and(|deadline| Instant::now() >= deadline) {
+            // SAFETY: pid remains the registered process-group leader until EOF and unregister.
             unsafe {
                 libc::kill(-pid, libc::SIGKILL);
             }
@@ -474,33 +520,48 @@ fn execute(
     if let Err(error) = log.lock().unwrap_or_else(|e| e.into_inner()).flush() {
         failure.get_or_insert_with(|| format!("cannot flush job log: {error}"));
     }
-    let elapsed = started.elapsed();
-    if cancellation.is_cancelled() {
-        let result = JobResult {
-            job: job.clone(),
-            status: JobStatus::Cancelled,
-            exit_code,
-            elapsed,
-            log_path: Some(log_path),
-            reason: "run cancelled".into(),
-        };
-        return result;
+    (exit_code, failure)
+}
+
+fn poll_child(pid: i32, reaped: &mut bool, exit_code: &mut Option<i32>) -> Option<String> {
+    let mut status = 0;
+    let waited = if *reaped {
+        0
+    } else {
+        // SAFETY: status points to writable storage and pid is the spawned child.
+        unsafe { libc::waitpid(pid, &mut status, libc::WNOHANG | libc::WUNTRACED) }
+    };
+    if waited == pid {
+        if libc::WIFEXITED(status) {
+            *exit_code = Some(libc::WEXITSTATUS(status));
+            *reaped = true;
+        } else if libc::WIFSIGNALED(status) {
+            *exit_code = Some(128 + libc::WTERMSIG(status));
+            *reaped = true;
+        } else if libc::WIFSTOPPED(status) {
+            let signal = libc::WSTOPSIG(status);
+            if signal == libc::SIGTTIN || signal == libc::SIGTTOU {
+                return Some("job needs terminal input; interactive child input is unsupported".into());
+            }
+        }
+    } else if waited == -1 {
+        let error = io::Error::last_os_error();
+        if error.raw_os_error() != Some(libc::EINTR) {
+            if error.raw_os_error() == Some(libc::ECHILD) {
+                *reaped = true;
+                *exit_code = Some(1);
+            }
+            return Some(format!("cannot wait for child: {error}"));
+        }
     }
-    if let Some(reason) = failure {
-        return failed(job, &reason, exit_code, Some(log_path), elapsed);
-    }
-    let code = exit_code.unwrap_or(1);
-    JobResult {
-        job: job.clone(),
-        status: if code == 0 {
-            JobStatus::Succeeded
-        } else {
-            JobStatus::Failed
-        },
-        exit_code: Some(code),
-        elapsed,
-        log_path: Some(log_path),
-        reason: String::new(),
+    None
+}
+
+fn terminate_process_group(pid: i32) {
+    // SAFETY: pid is a process-group leader created by this runner.
+    unsafe {
+        libc::kill(-pid, libc::SIGCONT);
+        libc::kill(-pid, libc::SIGTERM);
     }
 }
 
@@ -512,6 +573,7 @@ fn read_output<R: Read>(
 ) -> Result<(), String> {
     let mut bytes = vec![0; OUTPUT_CHUNK];
     let mut display_pending = Vec::new();
+    let mut display_connected = true;
     loop {
         let count = stream
             .read(&mut bytes)
@@ -519,7 +581,9 @@ fn read_output<R: Read>(
         if count == 0 {
             if !display_pending.is_empty() {
                 let text = String::from_utf8_lossy(&display_pending).into_owned();
-                let _ = events.send(RunEvent::Output { job, text });
+                if display_connected {
+                    notify(&events, RunEvent::Output { job, text });
+                }
             }
             return Ok(());
         }
@@ -530,34 +594,31 @@ fn read_output<R: Read>(
         display_pending.extend_from_slice(&bytes[..count]);
         match std::str::from_utf8(&display_pending) {
             Ok(text) => {
-                if !text.is_empty()
-                    && events
-                        .send(RunEvent::Output {
+                if !text.is_empty() && display_connected {
+                    display_connected = notify(
+                        &events,
+                        RunEvent::Output {
                             job: job.clone(),
                             text: text.to_owned(),
-                        })
-                        .is_err()
-                {
-                    return Ok(());
+                        },
+                    );
                 }
                 display_pending.clear();
             }
             Err(error) if error.error_len().is_none() => {
                 let valid = error.valid_up_to();
                 if valid > 0 {
-                    let text = std::str::from_utf8(&display_pending[..valid])
-                        .expect("valid UTF-8 prefix")
-                        .to_owned();
-                    if events.send(RunEvent::Output { job: job.clone(), text }).is_err() {
-                        return Ok(());
+                    let text = String::from_utf8_lossy(&display_pending[..valid]).into_owned();
+                    if display_connected {
+                        display_connected = notify(&events, RunEvent::Output { job: job.clone(), text });
                     }
                     display_pending.drain(..valid);
                 }
             }
             Err(_) => {
                 let text = String::from_utf8_lossy(&display_pending).into_owned();
-                if events.send(RunEvent::Output { job: job.clone(), text }).is_err() {
-                    return Ok(());
+                if display_connected {
+                    display_connected = notify(&events, RunEvent::Output { job: job.clone(), text });
                 }
                 display_pending.clear();
             }

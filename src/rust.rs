@@ -15,6 +15,14 @@ pub fn update() -> i32 {
     if code != 0 {
         return code;
     }
+    let validation = validate_channels();
+    if validation != 0 {
+        return validation;
+    }
+    remove_obsolete_toolchains()
+}
+
+fn validate_channels() -> i32 {
     for channel in ["stable", "nightly"] {
         let status = Command::new("rustup")
             .args(["run", channel, "rustc", "--version"])
@@ -29,6 +37,10 @@ pub fn update() -> i32 {
             }
         }
     }
+    0
+}
+
+fn remove_obsolete_toolchains() -> i32 {
     let installed = match Command::new("rustup")
         .args(["toolchain", "list"])
         .stdin(Stdio::null())

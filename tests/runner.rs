@@ -112,6 +112,30 @@ fn large_newline_free_output_is_fully_logged() {
 }
 
 #[test]
+fn disconnected_event_receiver_does_not_truncate_job_logs() {
+    let home = tempfile::tempdir().unwrap();
+    let (tx, rx) = mpsc::sync_channel(1);
+    drop(rx);
+    let output_size = 128 * 1024;
+    let result = runner::run(
+        &[job(
+            "disconnected",
+            "core",
+            &["/bin/sh", "-c", "head -c 131072 /dev/zero | tr '\\000' x"],
+        )],
+        options(home.path().into()),
+        tx,
+        mpsc::sync_channel(8).0,
+        Cancellation::default(),
+    )
+    .unwrap();
+    assert_eq!(
+        std::fs::metadata(result[0].log_path.as_ref().unwrap()).unwrap().len(),
+        output_size
+    );
+}
+
+#[test]
 fn unicode_split_across_pipe_reads_is_rendered_without_replacement() {
     let home = tempfile::tempdir().unwrap();
     let (tx, rx) = mpsc::sync_channel(128);

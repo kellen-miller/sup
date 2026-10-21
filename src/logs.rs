@@ -6,6 +6,12 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 #[cfg(unix)]
 use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt, PermissionsExt};
 
+/// Creates a private, unique run directory beneath the user's cache.
+///
+/// # Errors
+///
+/// Returns an error when the cache path contains unsafe entries or cannot be
+/// created or secured.
 pub fn create_run_dir(home: &Path) -> io::Result<PathBuf> {
     let cache = home.join(".cache");
     let sup = cache.join("sup");
@@ -67,6 +73,11 @@ pub fn create_run_dir(home: &Path) -> io::Result<PathBuf> {
     ))
 }
 
+/// Creates a private log file with a single-component filename.
+///
+/// # Errors
+///
+/// Returns an error when `name` is unsafe, already exists, or cannot be opened.
 pub fn create_job_log(run_dir: &Path, name: &str) -> io::Result<(PathBuf, fs::File)> {
     if name.is_empty()
         || name == "."
@@ -86,6 +97,12 @@ pub fn create_job_log(run_dir: &Path, name: &str) -> io::Result<(PathBuf, fs::Fi
     Ok((path, file))
 }
 
+/// Removes expired run directories without following symlinks.
+///
+/// # Errors
+///
+/// Returns an error when the run directory cannot be read or an expired entry
+/// cannot be inspected or removed.
 pub fn cleanup_old_runs(home: &Path, current: &Path, retention_days: i64) -> io::Result<()> {
     if retention_days < 0 {
         return Ok(());
