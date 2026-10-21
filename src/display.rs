@@ -10,7 +10,7 @@ use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Paragraph, Row, Table};
 use std::collections::{HashMap, VecDeque};
-use std::io::{self, IsTerminal, Read, Seek, SeekFrom};
+use std::io::{self, IsTerminal, Read, Seek, SeekFrom, Write};
 use std::sync::mpsc::Receiver;
 use std::time::{Duration, Instant};
 use zeroize::Zeroize;
@@ -289,6 +289,30 @@ pub fn render(frame: &mut ratatui::Frame<'_>, dashboard: &Dashboard, jobs: &[Job
         .direction(Direction::Vertical)
         .constraints([Constraint::Length(1), Constraint::Min(3), Constraint::Length(1)])
         .split(area);
+    render_title(frame, vertical[0], dashboard, jobs, statuses);
+    let height = vertical[1].height;
+    let job_count = if height >= 12 {
+        jobs.len().min(6).min(height.saturating_sub(11) as usize)
+    } else {
+        0
+    };
+    let job_rows = if job_count > 0 { job_count as u16 + 3 } else { 0 };
+    let middle = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Length(job_rows), Constraint::Min(1)])
+        .split(vertical[1]);
+    render_jobs(frame, middle[0], jobs, statuses, job_count);
+    render_output(frame, middle[1], dashboard, jobs.len().saturating_sub(job_count));
+    render_hint(frame, vertical[2], dashboard.following);
+}
+
+fn render_title(
+    frame: &mut ratatui::Frame<'_>,
+    area: Rect,
+    dashboard: &Dashboard,
+    jobs: &[Job],
+    statuses: &HashMap<String, String>,
+) {
     let title = Paragraph::new(Line::from(vec![
         Span::styled(
             " SUP ",
@@ -308,55 +332,55 @@ pub fn render(frame: &mut ratatui::Frame<'_>, dashboard: &Dashboard, jobs: &[Job
             Style::default().fg(tokyo_blue()),
         ),
     ]));
-    frame.render_widget(title, vertical[0]);
-    let height = vertical[1].height;
-    let job_count = if height >= 12 {
-        jobs.len().min(6).min(height.saturating_sub(11) as usize)
-    } else {
-        0
-    };
-    let job_rows = if job_count > 0 { job_count as u16 + 3 } else { 0 };
-    let hidden = jobs.len().saturating_sub(job_count);
-    let middle = Layout::default()
-        .direction(Direction::Vertical)
-        .constraints([Constraint::Length(job_rows), Constraint::Min(1)])
-        .split(vertical[1]);
-    if job_rows > 0 {
-        let mut ordered: Vec<&Job> = jobs.iter().collect();
-        ordered.sort_by_key(|job| match statuses.get(&job.name).map(String::as_str) {
-            Some("running") => 0,
-            Some("failed") => 1,
-            _ => 2,
-        });
-        let rows = ordered.into_iter().take(job_count).map(|job| {
-            let status = statuses.get(&job.name).cloned().unwrap_or_else(|| "queued".to_owned());
-            let color = match status.as_str() {
-                "running" => tokyo_cyan(),
-                "failed" => tokyo_red(),
-                "succeeded" => tokyo_green(),
-                _ => tokyo_muted(),
-            };
-            Row::new(vec![job.label.clone(), job.name.clone(), status]).style(Style::default().fg(color))
-        });
-        let table = Table::new(
-            rows,
-            [
-                Constraint::Percentage(42),
-                Constraint::Percentage(36),
-                Constraint::Percentage(22),
-            ],
-        )
-        .header(
-            Row::new(vec!["Job", "Name", "State"])
-                .style(Style::default().fg(tokyo_blue()).add_modifier(Modifier::BOLD)),
-        )
-        .block(
-            Block::default()
-                .borders(Borders::ALL)
-                .border_style(Style::default().fg(tokyo_panel())),
-        );
-        frame.render_widget(table, middle[0]);
+    frame.render_widget(title, area);
+}
+
+fn render_jobs(
+    frame: &mut ratatui::Frame<'_>,
+    area: Rect,
+    jobs: &[Job],
+    statuses: &HashMap<String, String>,
+    job_count: usize,
+) {
+    if job_count == 0 {
+        return;
     }
+    let mut ordered: Vec<&Job> = jobs.iter().collect();
+    ordered.sort_by_key(|job| match statuses.get(&job.name).map(String::as_str) {
+        Some("running") => 0,
+        Some("failed") => 1,
+        _ => 2,
+    });
+    let rows = ordered.into_iter().take(job_count).map(|job| {
+        let status = statuses.get(&job.name).cloned().unwrap_or_else(|| "queued".to_owned());
+        let color = match status.as_str() {
+            "running" => tokyo_cyan(),
+            "failed" => tokyo_red(),
+            "succeeded" => tokyo_green(),
+            _ => tokyo_muted(),
+        };
+        Row::new(vec![job.label.clone(), job.name.clone(), status]).style(Style::default().fg(color))
+    });
+    let table = Table::new(
+        rows,
+        [
+            Constraint::Percentage(42),
+            Constraint::Percentage(36),
+            Constraint::Percentage(22),
+        ],
+    )
+    .header(
+        Row::new(vec!["Job", "Name", "State"]).style(Style::default().fg(tokyo_blue()).add_modifier(Modifier::BOLD)),
+    )
+    .block(
+        Block::default()
+            .borders(Borders::ALL)
+            .border_style(Style::default().fg(tokyo_panel())),
+    );
+    frame.render_widget(table, area);
+}
+
+fn render_output(frame: &mut ratatui::Frame<'_>, area: Rect, dashboard: &Dashboard, hidden: usize) {
     let hidden_text = if hidden > 0 {
         format!("  {hidden} jobs hidden")
     } else {
@@ -367,8 +391,8 @@ pub fn render(frame: &mut ratatui::Frame<'_>, dashboard: &Dashboard, jobs: &[Job
         .title(heading)
         .borders(Borders::ALL)
         .border_style(Style::default().fg(tokyo_panel()));
-    let inner = output.inner(middle[1]);
-    frame.render_widget(output, middle[1]);
+    let inner = output.inner(area);
+    frame.render_widget(output, area);
     if inner.width > 0 && inner.height > 0 {
         let visible = inner.height as usize;
         let last = dashboard
@@ -399,17 +423,22 @@ pub fn render(frame: &mut ratatui::Frame<'_>, dashboard: &Dashboard, jobs: &[Job
         let paragraph = Paragraph::new(padded).alignment(Alignment::Left);
         frame.render_widget(paragraph, inner);
     }
-    let hint = if dashboard.following {
+}
+
+fn render_hint(frame: &mut ratatui::Frame<'_>, area: Rect, following: bool) {
+    let hint = if following {
         " ↑↓/PgUp PgDn/wheel scroll   End follow   Ctrl-C cancel "
     } else {
         " [PAUSED] ↑↓/PgUp PgDn/wheel scroll   End follow   Ctrl-C cancel "
     };
-    frame.render_widget(
-        Paragraph::new(hint).style(Style::default().fg(tokyo_muted())),
-        vertical[2],
-    );
+    frame.render_widget(Paragraph::new(hint).style(Style::default().fg(tokyo_muted())), area);
 }
 
+/// Run the interactive dashboard or its plain terminal fallback until the runner finishes.
+///
+/// # Errors
+///
+/// Returns an error when terminal setup, rendering, or input fails.
 pub fn run(
     jobs: &[Job],
     event_rx: Receiver<RunEvent>,
@@ -428,26 +457,7 @@ pub fn run(
     let mut disconnected = false;
     let mut last_draw = Instant::now();
     loop {
-        for _ in 0..256 {
-            match event_rx.try_recv() {
-                Ok(event) => match event {
-                    RunEvent::RunDirectory(path) => log_dir = Some(path),
-                    RunEvent::Started(name) => {
-                        states.insert(name, "running".to_owned());
-                    }
-                    RunEvent::Output { job, text } => dashboard.push(&job, &text),
-                    RunEvent::Finished(result) => {
-                        dashboard.finish_job(&result.job.name);
-                        states.insert(result.job.name.clone(), format!("{:?}", result.status).to_lowercase());
-                    }
-                },
-                Err(std::sync::mpsc::TryRecvError::Disconnected) => {
-                    disconnected = true;
-                    break;
-                }
-                Err(std::sync::mpsc::TryRecvError::Empty) => break,
-            }
-        }
+        disconnected |= collect_run_events(&event_rx, &mut dashboard, &mut states, &mut log_dir);
         if password.is_none()
             && let Ok(request) = auth_rx.try_recv()
             && request.is_active()
@@ -484,69 +494,12 @@ pub fn run(
             break;
         }
         if event::poll(Duration::from_millis(15)).map_err(|error| error.to_string())? {
-            match event::read().map_err(|error| error.to_string())? {
-                Event::Key(key) => {
-                    if let Some((request, mut secret)) = password.take() {
-                        match key.code {
-                            KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-                                request.one_use_reply.respond(PasswordReply::Cancel);
-                                cancellation.cancel();
-                            }
-                            KeyCode::Esc => request.one_use_reply.respond(PasswordReply::Cancel),
-                            KeyCode::Enter => request.one_use_reply.respond(PasswordReply::Submit(secret)),
-                            KeyCode::Backspace => {
-                                secret.backspace();
-                                password = Some((request, secret));
-                            }
-                            KeyCode::Char(ch)
-                                if !key.modifiers.intersects(KeyModifiers::CONTROL | KeyModifiers::ALT) =>
-                            {
-                                let mut buffer = [0; 4];
-                                let encoded = ch.encode_utf8(&mut buffer);
-                                for byte in encoded.as_bytes() {
-                                    if secret.push(*byte).is_err() {
-                                        request.one_use_reply.respond(PasswordReply::Cancel);
-                                        cancellation.cancel();
-                                        buffer.zeroize();
-                                        return Err("password exceeded the supported length".to_owned());
-                                    }
-                                }
-                                buffer.zeroize();
-                                password = Some((request, secret));
-                            }
-                            _ => password = Some((request, secret)),
-                        }
-                    } else {
-                        match key.code {
-                            KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-                                cancellation.cancel()
-                            }
-                            KeyCode::Up => dashboard.scroll(-1),
-                            KeyCode::Down => dashboard.scroll(1),
-                            KeyCode::PageUp => {
-                                let page = crossterm::terminal::size()
-                                    .map(|(_, height)| height.saturating_sub(13).max(6) as isize)
-                                    .unwrap_or(8);
-                                dashboard.scroll(-page);
-                            }
-                            KeyCode::PageDown => {
-                                let page = crossterm::terminal::size()
-                                    .map(|(_, height)| height.saturating_sub(13).max(6) as isize)
-                                    .unwrap_or(8);
-                                dashboard.scroll(page);
-                            }
-                            KeyCode::End => dashboard.resume(),
-                            _ => {}
-                        }
-                    }
-                }
-                Event::Mouse(mouse) => match mouse.kind {
-                    MouseEventKind::ScrollUp => dashboard.scroll(-3),
-                    MouseEventKind::ScrollDown => dashboard.scroll(3),
-                    _ => {}
-                },
-                Event::Resize(_, _) | Event::FocusGained | Event::FocusLost | Event::Paste(_) => {}
-            }
+            handle_terminal_event(
+                event::read().map_err(|error| error.to_string())?,
+                &mut password,
+                &mut dashboard,
+                &cancellation,
+            )?;
         }
         if password.is_none()
             && let Ok(request) = auth_rx.try_recv()
@@ -564,6 +517,107 @@ pub fn run(
         request.0.one_use_reply.respond(PasswordReply::Cancel);
     }
     Ok(log_dir)
+}
+
+fn collect_run_events(
+    event_rx: &Receiver<RunEvent>,
+    dashboard: &mut Dashboard,
+    states: &mut HashMap<String, String>,
+    log_dir: &mut Option<std::path::PathBuf>,
+) -> bool {
+    for _ in 0..256 {
+        let event = match event_rx.try_recv() {
+            Ok(event) => event,
+            Err(std::sync::mpsc::TryRecvError::Disconnected) => return true,
+            Err(std::sync::mpsc::TryRecvError::Empty) => return false,
+        };
+        match event {
+            RunEvent::RunDirectory(path) => *log_dir = Some(path),
+            RunEvent::Started(name) => {
+                states.insert(name, "running".to_owned());
+            }
+            RunEvent::Output { job, text } => dashboard.push(&job, &text),
+            RunEvent::Finished(result) => {
+                dashboard.finish_job(&result.job.name);
+                states.insert(result.job.name.clone(), format!("{:?}", result.status).to_lowercase());
+            }
+        }
+    }
+    false
+}
+
+fn handle_terminal_event(
+    input: Event,
+    password: &mut Option<(AuthRequest, Password)>,
+    dashboard: &mut Dashboard,
+    cancellation: &Cancellation,
+) -> Result<(), String> {
+    match input {
+        Event::Key(key) => match password.take() {
+            Some((request, secret)) => handle_password_key(key, request, secret, password, cancellation)?,
+            None => handle_dashboard_key(key, dashboard, cancellation),
+        },
+        Event::Mouse(mouse) => match mouse.kind {
+            MouseEventKind::ScrollUp => dashboard.scroll(-3),
+            MouseEventKind::ScrollDown => dashboard.scroll(3),
+            _ => {}
+        },
+        Event::Resize(_, _) | Event::FocusGained | Event::FocusLost | Event::Paste(_) => {}
+    }
+    Ok(())
+}
+
+fn handle_password_key(
+    key: crossterm::event::KeyEvent,
+    request: AuthRequest,
+    mut secret: Password,
+    password: &mut Option<(AuthRequest, Password)>,
+    cancellation: &Cancellation,
+) -> Result<(), String> {
+    match key.code {
+        KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+            request.one_use_reply.respond(PasswordReply::Cancel);
+            cancellation.cancel();
+        }
+        KeyCode::Esc => request.one_use_reply.respond(PasswordReply::Cancel),
+        KeyCode::Enter => request.one_use_reply.respond(PasswordReply::Submit(secret)),
+        KeyCode::Backspace => {
+            secret.backspace();
+            *password = Some((request, secret));
+        }
+        KeyCode::Char(ch) if !key.modifiers.intersects(KeyModifiers::CONTROL | KeyModifiers::ALT) => {
+            let mut buffer = [0; 4];
+            let encoded = ch.encode_utf8(&mut buffer);
+            let append_failed = encoded.as_bytes().iter().any(|byte| secret.push(*byte).is_err());
+            buffer.zeroize();
+            if append_failed {
+                request.one_use_reply.respond(PasswordReply::Cancel);
+                cancellation.cancel();
+                return Err("password exceeded the supported length".to_owned());
+            }
+            *password = Some((request, secret));
+        }
+        _ => *password = Some((request, secret)),
+    }
+    Ok(())
+}
+
+fn handle_dashboard_key(key: crossterm::event::KeyEvent, dashboard: &mut Dashboard, cancellation: &Cancellation) {
+    match key.code {
+        KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => cancellation.cancel(),
+        KeyCode::Up => dashboard.scroll(-1),
+        KeyCode::Down => dashboard.scroll(1),
+        KeyCode::PageUp => dashboard.scroll(-page_height()),
+        KeyCode::PageDown => dashboard.scroll(page_height()),
+        KeyCode::End => dashboard.resume(),
+        _ => {}
+    }
+}
+
+fn page_height() -> isize {
+    crossterm::terminal::size()
+        .map(|(_, height)| height.saturating_sub(13).max(6) as isize)
+        .unwrap_or(8)
 }
 
 fn plain_run(
@@ -613,31 +667,44 @@ pub fn print_summary(results: &[JobResult], log_dir: Option<&std::path::Path>, t
         }
         if let Some(path) = &result.log_path {
             println!("  log: {}", path.display());
-            if result.exit_code.is_some_and(|code| code != 0)
-                && let Ok(mut file) = std::fs::File::open(path)
-            {
-                let length = file.metadata().map(|metadata| metadata.len()).unwrap_or(0);
-                let start = length.saturating_sub(64 * 1024);
-                if file.seek(SeekFrom::Start(start)).is_ok() {
-                    let mut bytes = Vec::new();
-                    let _ = file.read_to_end(&mut bytes);
-                    let tail = String::from_utf8_lossy(&bytes);
-                    for line in tail
-                        .lines()
-                        .rev()
-                        .take(tail_lines)
-                        .collect::<Vec<_>>()
-                        .into_iter()
-                        .rev()
-                    {
-                        eprintln!("  {line}");
-                    }
-                }
+            if result.exit_code.is_some_and(|code| code != 0) {
+                print_log_tail(path, tail_lines);
             }
         }
     }
     if let Some(path) = log_dir {
         println!("Run logs: {}", path.display());
+    }
+}
+
+fn print_log_tail(path: &std::path::Path, tail_lines: usize) {
+    let mut file = match std::fs::File::open(path) {
+        Ok(file) => file,
+        Err(error) => {
+            eprintln!("  cannot read log {}: {error}", path.display());
+            return;
+        }
+    };
+    let length = file.metadata().map(|metadata| metadata.len()).unwrap_or(0);
+    if let Err(error) = file.seek(SeekFrom::Start(length.saturating_sub(64 * 1024))) {
+        eprintln!("  cannot seek log {}: {error}", path.display());
+        return;
+    }
+    let mut bytes = Vec::new();
+    if let Err(error) = file.read_to_end(&mut bytes) {
+        eprintln!("  cannot read log {}: {error}", path.display());
+        return;
+    }
+    let tail = String::from_utf8_lossy(&bytes);
+    for line in tail
+        .lines()
+        .rev()
+        .take(tail_lines)
+        .collect::<Vec<_>>()
+        .into_iter()
+        .rev()
+    {
+        eprintln!("  {line}");
     }
 }
 
@@ -725,26 +792,25 @@ impl TerminalGuard {
             crossterm::event::EnableMouseCapture,
             crossterm::cursor::Hide
         ) {
-            let _ = execute!(
-                stdout,
-                crossterm::event::DisableMouseCapture,
-                crossterm::cursor::Show,
-                crossterm::terminal::LeaveAlternateScreen
-            );
-            let _ = crossterm::terminal::disable_raw_mode();
+            if let Err(cleanup_error) = restore_screen(&mut stdout) {
+                eprintln!("sup: terminal cleanup failed: {cleanup_error}");
+            }
+            if let Err(cleanup_error) = crossterm::terminal::disable_raw_mode() {
+                eprintln!("sup: raw mode cleanup failed: {cleanup_error}");
+            }
             return Err(error.to_string());
         }
         let backend = CrosstermBackend::new(stdout);
         match Terminal::new(backend) {
             Ok(terminal) => Ok(Self { terminal }),
             Err(error) => {
-                let _ = execute!(
-                    std::io::stdout(),
-                    crossterm::event::DisableMouseCapture,
-                    crossterm::cursor::Show,
-                    crossterm::terminal::LeaveAlternateScreen
-                );
-                let _ = crossterm::terminal::disable_raw_mode();
+                let mut stdout = std::io::stdout();
+                if let Err(cleanup_error) = restore_screen(&mut stdout) {
+                    eprintln!("sup: terminal cleanup failed: {cleanup_error}");
+                }
+                if let Err(cleanup_error) = crossterm::terminal::disable_raw_mode() {
+                    eprintln!("sup: raw mode cleanup failed: {cleanup_error}");
+                }
                 Err(error.to_string())
             }
         }
@@ -753,13 +819,32 @@ impl TerminalGuard {
 
 impl Drop for TerminalGuard {
     fn drop(&mut self) {
-        let _ = execute!(
-            self.terminal.backend_mut(),
-            crossterm::event::DisableMouseCapture,
-            crossterm::cursor::Show,
-            crossterm::terminal::LeaveAlternateScreen
-        );
-        let _ = crossterm::terminal::disable_raw_mode();
-        let _ = self.terminal.show_cursor();
+        if let Err(error) = restore_screen(self.terminal.backend_mut()) {
+            eprintln!("sup: terminal cleanup failed: {error}");
+        }
+        if let Err(error) = crossterm::terminal::disable_raw_mode() {
+            eprintln!("sup: raw mode cleanup failed: {error}");
+        }
+        if let Err(error) = self.terminal.show_cursor() {
+            eprintln!("sup: cursor cleanup failed: {error}");
+        }
     }
+}
+
+fn restore_screen(output: &mut impl Write) -> io::Result<()> {
+    let mut first_error = None;
+    if let Err(error) = execute!(output, crossterm::event::DisableMouseCapture) {
+        first_error = Some(error);
+    }
+    if let Err(error) = execute!(output, crossterm::cursor::Show)
+        && first_error.is_none()
+    {
+        first_error = Some(error);
+    }
+    if let Err(error) = execute!(output, crossterm::terminal::LeaveAlternateScreen)
+        && first_error.is_none()
+    {
+        first_error = Some(error);
+    }
+    first_error.map_or(Ok(()), Err)
 }

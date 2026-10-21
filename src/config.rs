@@ -170,6 +170,11 @@ fn default_version() -> u32 {
     1
 }
 
+/// Resolve the explicit config path or the standard XDG/home config path.
+///
+/// # Errors
+///
+/// Returns an error when neither `XDG_CONFIG_HOME` nor `HOME` identifies a base directory.
 pub fn resolve_path(explicit: Option<&Path>, environ: &HashMap<String, String>) -> Result<(PathBuf, bool), String> {
     if let Some(path) = explicit {
         return Ok((path.to_path_buf(), true));
@@ -188,6 +193,11 @@ pub fn resolve_path(explicit: Option<&Path>, environ: &HashMap<String, String>) 
     Ok((base.join("sup/config.toml"), false))
 }
 
+/// Read and validate runtime TOML, falling back to embedded defaults only when the default file is absent.
+///
+/// # Errors
+///
+/// Returns an error when the path cannot be resolved/read, TOML is invalid, or configuration validation fails.
 pub fn load(path: Option<&Path>, home: &Path, environ: &HashMap<String, String>) -> Result<LoadedConfig, String> {
     let (resolved, explicit) = resolve_path(path, environ)?;
     let (text, source) = match fs::read_to_string(&resolved) {
@@ -203,6 +213,11 @@ pub fn load(path: Option<&Path>, home: &Path, environ: &HashMap<String, String>)
     normalize(raw, home, environ, source)
 }
 
+/// Validate raw configuration and expand supported environment references.
+///
+/// # Errors
+///
+/// Returns an error when version, jobs, names, phases, commands, filenames, or aliases are invalid.
 pub fn normalize(
     raw: Config,
     home: &Path,
@@ -279,6 +294,11 @@ pub fn normalize(
     })
 }
 
+/// Convert legacy YAML to validated TOML for the explicit migration command.
+///
+/// # Errors
+///
+/// Returns an error when YAML parsing, normalization, or TOML serialization fails.
 pub fn migrate_yaml(
     text: &str,
     home: &Path,
@@ -337,6 +357,11 @@ pub fn migrate_yaml(
     Ok((serialized, notices))
 }
 
+/// Select jobs by name and alias, applying exclusions after inclusions.
+///
+/// # Errors
+///
+/// Returns an error when a requested selector names neither a job nor an alias.
 pub fn selectors(
     jobs: &[Job],
     aliases: &HashMap<String, Vec<String>>,
@@ -403,7 +428,9 @@ fn expand(value: &str, vars: &HashMap<String, String>) -> String {
     let mut i = 0;
     while i < bytes.len() {
         if bytes[i] != b'$' {
-            let c = value[i..].chars().next().unwrap();
+            let Some(c) = value.get(i..).and_then(|suffix| suffix.chars().next()) else {
+                break;
+            };
             out.push(c);
             i += c.len_utf8();
             continue;

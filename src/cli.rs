@@ -43,6 +43,13 @@ struct ConfigCommand {
     command: ConfigAction,
 }
 
+struct RunSettings {
+    no_tui: bool,
+    tail: usize,
+    retention_days: Option<i64>,
+    no_log_cleanup: bool,
+}
+
 #[derive(Subcommand)]
 enum ConfigAction {
     Init {
@@ -62,13 +69,9 @@ where
     I: IntoIterator<Item = T>,
     T: Into<std::ffi::OsString> + Clone,
 {
-    let cli = match Cli::try_parse_from(std::iter::once("sup".into()).chain(args.into_iter().map(Into::into))) {
+    let cli = match parse_args(args) {
         Ok(cli) => cli,
-        Err(error) => {
-            let code = error.exit_code();
-            let _ = error.print();
-            return code;
-        }
+        Err(code) => return code,
     };
     let env: HashMap<String, String> = std::env::vars().collect();
     let home = match env.get("HOME") {
@@ -79,20 +82,7 @@ where
         }
     };
     if let Some(Command::Config(config_command)) = cli.command {
-        return match config_command.command {
-            ConfigAction::Init { output } => {
-                let default_path = match config::resolve_path(cli.config.as_deref(), &env) {
-                    Ok((path, _)) => path,
-                    Err(error) => {
-                        eprintln!("sup: {error}");
-                        return 2;
-                    }
-                };
-                let target = output.unwrap_or(default_path);
-                create_exclusive(&target, config::DEFAULT_CONFIG.as_bytes())
-            }
-            ConfigAction::Migrate { from, to } => migrate(&from, &to, &home, &env),
-        };
+        return run_config(config_command.command, cli.config.as_deref(), &home, &env);
     }
     let loaded = match config::load(cli.config.as_deref(), &home, &env) {
         Ok(config) => config,
@@ -109,6 +99,65 @@ where
             return 2;
         }
     };
+    dispatch(
+        RunSettings {
+            no_tui: cli.no_tui,
+            tail: cli.tail,
+            retention_days: cli.log_retention_days,
+            no_log_cleanup: cli.no_log_cleanup,
+        },
+        loaded,
+        selected,
+        command,
+        home,
+    )
+}
+
+fn parse_args<I, T>(args: I) -> Result<Cli, i32>
+where
+    I: IntoIterator<Item = T>,
+    T: Into<std::ffi::OsString> + Clone,
+{
+    match Cli::try_parse_from(std::iter::once("sup".into()).chain(args.into_iter().map(Into::into))) {
+        Ok(cli) => Ok(cli),
+        Err(error) => {
+            let code = error.exit_code();
+            if let Err(print_error) = error.print() {
+                eprintln!("sup: cannot print command-line error: {print_error}");
+            }
+            Err(code)
+        }
+    }
+}
+
+fn run_config(
+    command: ConfigAction,
+    config_path: Option<&std::path::Path>,
+    home: &std::path::Path,
+    env: &HashMap<String, String>,
+) -> i32 {
+    match command {
+        ConfigAction::Init { output } => {
+            let default_path = match config::resolve_path(config_path, env) {
+                Ok((path, _)) => path,
+                Err(error) => {
+                    eprintln!("sup: {error}");
+                    return 2;
+                }
+            };
+            create_exclusive(&output.unwrap_or(default_path), config::DEFAULT_CONFIG.as_bytes())
+        }
+        ConfigAction::Migrate { from, to } => migrate(&from, &to, home, env),
+    }
+}
+
+fn dispatch(
+    settings: RunSettings,
+    loaded: config::LoadedConfig,
+    selected: Vec<config::Job>,
+    command: Command,
+    home: PathBuf,
+) -> i32 {
     match command {
         Command::List => {
             for job in loaded.jobs {
@@ -143,8 +192,8 @@ where
             let cancellation = Cancellation::new();
             let options = RunOptions {
                 home,
-                retention_days: cli.log_retention_days.unwrap_or(loaded.retention_days),
-                cleanup_logs: loaded.cleanup_logs && !cli.no_log_cleanup,
+                retention_days: settings.retention_days.unwrap_or(loaded.retention_days),
+                cleanup_logs: loaded.cleanup_logs && !settings.no_log_cleanup,
             };
             let (events_tx, events_rx) = std::sync::mpsc::sync_channel(128);
             let (auth_tx, auth_rx) = std::sync::mpsc::sync_channel(8);
@@ -153,7 +202,7 @@ where
             let worker =
                 std::thread::spawn(move || runner::run(&worker_jobs, options, events_tx, auth_tx, worker_cancel));
             let displayed = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                display::run(&selected, events_rx, auth_rx, cancellation.clone(), cli.no_tui)
+                display::run(&selected, events_rx, auth_rx, cancellation.clone(), settings.no_tui)
             }))
             .unwrap_or_else(|_| Err("dashboard panicked".to_owned()));
             if displayed.is_err() {
@@ -162,12 +211,12 @@ where
             match worker.join() {
                 Ok(Ok(results)) => match displayed {
                     Ok(log_dir) => {
-                        display::print_summary(&results, log_dir.as_deref(), cli.tail);
+                        display::print_summary(&results, log_dir.as_deref(), settings.tail);
                         runner::exit_code(&results, &cancellation)
                     }
                     Err(error) => {
                         eprintln!("sup: dashboard failed: {error}");
-                        display::print_summary(&results, None, cli.tail);
+                        display::print_summary(&results, None, settings.tail);
                         1
                     }
                 },
@@ -219,7 +268,9 @@ fn create_exclusive(path: &PathBuf, bytes: &[u8]) -> i32 {
         .and_then(|()| file.sync_all())
         .and_then(|()| fs::hard_link(&temp, path))
     {
-        let _ = fs::remove_file(&temp);
+        if let Err(cleanup_error) = fs::remove_file(&temp) {
+            eprintln!("sup: cannot remove temporary file {}: {cleanup_error}", temp.display());
+        }
         eprintln!("sup: cannot publish {} without overwriting: {error}", path.display());
         return 2;
     }
