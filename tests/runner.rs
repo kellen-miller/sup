@@ -1,3 +1,5 @@
+#![cfg(test)]
+
 use std::path::PathBuf;
 use std::sync::mpsc;
 use std::thread;
@@ -210,6 +212,7 @@ fn cancellation_terminates_the_process_group_promptly() {
     let pid: i32 = std::fs::read_to_string(descendant_pid).unwrap().trim().parse().unwrap();
     let stopped = Instant::now();
     loop {
+        // SAFETY: signal zero probes this recorded process ID without sending a signal or using pointers.
         if unsafe { libc::kill(pid, 0) } == -1 && std::io::Error::last_os_error().raw_os_error() == Some(libc::ESRCH) {
             break;
         }

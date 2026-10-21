@@ -1,3 +1,5 @@
+#![cfg(test)]
+
 use std::process::Command;
 
 #[test]
@@ -285,11 +287,44 @@ fn run_uses_only_the_explicit_synthetic_config() {
 }
 
 #[cfg(unix)]
+fn terminal_pair() -> (std::fs::File, std::fs::File) {
+    use std::fs::File;
+    use std::os::fd::{AsRawFd, FromRawFd};
+
+    let mut master = -1;
+    let mut slave = -1;
+    assert_eq!(
+        // SAFETY: output pointers are valid and disjoint; null optional arguments select defaults.
+        unsafe {
+            libc::openpty(
+                &mut master,
+                &mut slave,
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+            )
+        },
+        0
+    );
+    // SAFETY: successful openpty returned two new descriptors, each moved into exactly one File.
+    let (master, slave) = unsafe { (File::from_raw_fd(master), File::from_raw_fd(slave)) };
+    for fd in [master.as_raw_fd(), slave.as_raw_fd()] {
+        // SAFETY: these descriptors remain owned by the Files throughout the call.
+        assert_ne!(unsafe { libc::fcntl(fd, libc::F_SETFD, libc::FD_CLOEXEC) }, -1);
+    }
+
+    assert_ne!(
+        // SAFETY: master owns this live descriptor; nonblocking reads keep test deadlines enforceable.
+        unsafe { libc::fcntl(master.as_raw_fd(), libc::F_SETFL, libc::O_NONBLOCK) },
+        -1
+    );
+    (master, slave)
+}
+
+#[cfg(unix)]
 #[test]
 fn tty_stopped_child_fails_and_is_terminated() {
-    use std::fs::File;
     use std::io::Read;
-    use std::os::fd::FromRawFd;
     use std::os::unix::process::CommandExt;
     use std::process::Stdio;
     use std::time::{Duration, Instant};
@@ -303,23 +338,7 @@ fn tty_stopped_child_fails_and_is_terminated() {
         "version = 1\n[[jobs]]\nname = 'tty'\nphase = 'core'\ncommand = ['/bin/cat', '/dev/tty']\n\n[[jobs]]\nname = 'sleeper'\nphase = 'core'\ncommand = ['/bin/sleep', '30']\n",
     )
     .unwrap();
-    let mut master = -1;
-    let mut slave = -1;
-    assert_eq!(
-        unsafe {
-            libc::openpty(
-                &mut master,
-                &mut slave,
-                std::ptr::null_mut(),
-                std::ptr::null_mut(),
-                std::ptr::null_mut(),
-            )
-        },
-        0
-    );
-    assert_ne!(unsafe { libc::fcntl(master, libc::F_SETFL, libc::O_NONBLOCK) }, -1);
-    let master = unsafe { File::from_raw_fd(master) };
-    let slave = unsafe { File::from_raw_fd(slave) };
+    let (master, slave) = terminal_pair();
     let stdin = slave.try_clone().unwrap();
     let stdout = slave.try_clone().unwrap();
     let stderr = slave;
@@ -337,6 +356,7 @@ fn tty_stopped_child_fails_and_is_terminated() {
         .stdin(Stdio::from(stdin))
         .stdout(Stdio::from(stdout))
         .stderr(Stdio::from(stderr));
+    // SAFETY: only async-signal-safe session, terminal and signal syscalls run after fork.
     unsafe {
         command.pre_exec(|| {
             if libc::setsid() == -1
@@ -363,6 +383,7 @@ fn tty_stopped_child_fails_and_is_terminated() {
             Err(_) => {}
         }
         if !interrupted && String::from_utf8_lossy(&output).contains("Running sleeper") {
+            // SAFETY: Child owns this unreaped pid, so it cannot have been reused.
             assert_eq!(unsafe { libc::kill(child.id() as i32, libc::SIGTERM) }, 0);
             interrupted = true;
         }
