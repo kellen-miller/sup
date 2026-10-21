@@ -18,10 +18,9 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           persist-credentials: false
-      - uses: actions-rust-lang/setup-rust-toolchain@ecabd13d1c56bd1345c230e542e9144811ad706f # v2.0.0
+      - uses: kellen-miller/ci/.github/actions/rust-check@9478f2f23f217048a86cb1916fb78b312f20afa7
         with:
-          components: rustfmt
-      - run: cargo fmt --all -- --check
+          checks: fmt
 
   clippy:
     name: Rust Clippy
@@ -30,8 +29,9 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           persist-credentials: false
-      - uses: actions-rust-lang/setup-rust-toolchain@ecabd13d1c56bd1345c230e542e9144811ad706f # v2.0.0
-      - run: cargo clippy --locked --all-targets -- -D warnings
+      - uses: kellen-miller/ci/.github/actions/rust-check@9478f2f23f217048a86cb1916fb78b312f20afa7
+        with:
+          checks: clippy
 
   tests-linux:
     name: Rust Tests (Linux)
@@ -40,9 +40,10 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           persist-credentials: false
-      - uses: actions-rust-lang/setup-rust-toolchain@ecabd13d1c56bd1345c230e542e9144811ad706f # v2.0.0
-      - run: cargo test --locked --all-targets
-      - run: cargo build --locked --release --bins
+      - uses: kellen-miller/ci/.github/actions/rust-check@9478f2f23f217048a86cb1916fb78b312f20afa7
+        with:
+          checks: test build
+          build-profile: release
 
   tests-macos:
     name: Rust Tests (macOS)
@@ -51,9 +52,10 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           persist-credentials: false
-      - uses: actions-rust-lang/setup-rust-toolchain@ecabd13d1c56bd1345c230e542e9144811ad706f # v2.0.0
-      - run: cargo test --locked --all-targets
-      - run: cargo build --locked --release --bins
+      - uses: kellen-miller/ci/.github/actions/rust-check@9478f2f23f217048a86cb1916fb78b312f20afa7
+        with:
+          checks: test build
+          build-profile: release
 
   yaml:
     name: YAML lint

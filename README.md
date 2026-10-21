@@ -60,17 +60,29 @@ Each run writes logs under `~/.cache/sup/runs/<run-id>/`. Logs contain complete 
 
 ## Development
 
+CI uses the bundled Rust policy from [CI #21](https://github.com/kellen-miller/ci/pull/21), pinned in `.github/workflows/rust.yml`. Use the same revision locally; plain Cargo formatting and Clippy do not load that policy. Python 3.11+ and Bash are needed for the external check script, alongside Cargo, rustfmt and Clippy. SUP itself has no Python dependency.
+
+Prepare a policy checkout once:
+
 ```bash
-cargo fmt --all -- --check
-cargo clippy --locked --all-targets -- -D warnings
-cargo test --locked --all-targets
-cargo build --locked --release --bins
-uvx yamllint==1.38.0 --strict .
-actionlint
-sup plan
-sup list
+sup_ci_checkout="$(mktemp -d)"
+git clone --filter=blob:none https://github.com/kellen-miller/ci.git "$sup_ci_checkout"
+git -C "$sup_ci_checkout" checkout --detach 9478f2f23f217048a86cb1916fb78b312f20afa7
 ```
 
-Tests use explicit temporary configs and synthetic commands. Do not execute configured update jobs unless the user explicitly asks for a real update run; use `sup plan` to preview them.
+From SUP's checkout, run the same checks as CI:
 
-GitHub Actions runs formatting, Clippy, tests and release builds on Linux and macOS, plus YAML, reusable workflow, and Renovate configuration checks. YAML lint is pinned independently from the Rust package. YAML rules use two-space indentation, block collections, and no line-length limit.
+```bash
+SETUP_TOOLCHAIN=false WORKING_DIRECTORY="$PWD" \
+  CHECKS="fmt clippy test build" BUILD_PROFILE=release \
+  bash "$sup_ci_checkout/.github/actions/rust-check/check.sh"
+uvx yamllint==1.38.0 --strict .
+actionlint
+git diff --check
+cargo run --locked -- plan
+cargo run --locked -- list
+```
+
+The action loads its own formatting, compiler and Clippy settings without copying policy into SUP. Keep the local checkout revision aligned with the workflow pin. Tests use explicit temporary configs and synthetic commands. Do not execute configured update jobs unless the user explicitly asks for a real update run; use `sup plan` to preview them.
+
+GitHub Actions runs the shared policy, tests and release builds on Linux and macOS, plus YAML, workflow and Renovate checks. YAML lint is pinned independently from the Rust package. YAML rules use two-space indentation, block collections, and no line-length limit.

@@ -6,30 +6,30 @@
 
 ## Development Commands
 
-Use Cargo for local execution and packaging:
+Use Cargo for runtime previews and the pinned shared CI script for validation. Rust policy comes from the exact `kellen-miller/ci` revision in `.github/workflows/rust.yml`; plain `cargo fmt` and `cargo clippy` do not apply it. Do not copy policy files or add inline lint suppressions. Bash and Python 3.11+ are external validation tools, not SUP runtime dependencies.
+
+Prepare a checkout once (see README):
 
 ```bash
-cargo run -- plan
-cargo run -- list
-cargo fmt --all -- --check
-cargo clippy --locked --all-targets -- -D warnings
-cargo test --locked --all-targets
-cargo build --locked --release --bins
-uvx yamllint==1.38.0 --strict .
-actionlint
+sup_ci_checkout="$(mktemp -d)"
+git clone --filter=blob:none https://github.com/kellen-miller/ci.git "$sup_ci_checkout"
+git -C "$sup_ci_checkout" checkout --detach 9478f2f23f217048a86cb1916fb78b312f20afa7
 ```
 
-Before claiming work is complete, run:
+Before claiming work complete, run from SUP's checkout:
 
 ```bash
-cargo fmt --all -- --check
-cargo clippy --locked --all-targets -- -D warnings
-cargo test --locked --all-targets
-cargo build --locked --release --bins
+SETUP_TOOLCHAIN=false WORKING_DIRECTORY="$PWD" \
+  CHECKS="fmt clippy test build" BUILD_PROFILE=release \
+  bash "$sup_ci_checkout/.github/actions/rust-check/check.sh"
 uvx yamllint==1.38.0 --strict .
 actionlint
 git diff --check
+cargo run --locked -- plan
+cargo run --locked -- list
 ```
+
+The policy enforces 120-column stable formatting, warnings-as-errors, error handling, documented unsafe boundaries and function complexity/size limits. Favor cohesive lifecycle code over helper chains when resolving diagnostics. Keep the local policy checkout aligned with the action pin.
 
 ## Runtime Safety
 
