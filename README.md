@@ -1,132 +1,76 @@
 # sup
 
-`sup` is a configurable local update runner. It executes jobs from a YAML
-config, captures per-job logs, and shows a Rich terminal dashboard while work is
-running. The dashboard shows a bounded rolling output tail for each active job.
+`sup` is a Rust CLI for running local update jobs from a validated TOML config. It keeps job output in per-run logs and provides a terminal dashboard with a bounded, scrollable output view.
 
 ## Install
 
-This project uses `uv`.
+Install the three binaries (`sup`, `sup-askpass`, and `sup-rust-update`) from this checkout:
 
 ```bash
-uv run --project . sup --help
+cargo install --path . --locked
 ```
 
-For a shell alias or function, point your wrapper at this repository and run:
+The package declares Rust 1.89 as its minimum supported version. Development and CI use the latest stable toolchain, with `rustfmt` and `clippy` installed.
+
+## Commands
+
+```text
+sup [--config FILE] [--only SELECTOR]... [--skip SELECTOR]... [--no-tui]
+sup run
+sup list
+sup plan
+sup config init [--output FILE]
+sup config migrate --from FILE --to FILE
+```
+
+Running `sup` or `sup run` executes the selected jobs. `sup list` prints job names. `sup plan` shows the config source, selected order, phase, auth mode, and command without running jobs. Selectors accept job names or aliases; repeated and comma-separated selectors are supported, and skipped jobs take precedence. `--tail`, `--log-retention-days`, and `--no-log-cleanup` control output and log retention. `--no-tui` uses the plain reporter.
+
+`sup list` replaces `--list`; `sup plan` replaces `--dry-run`. The Python entry point is removed.
+
+The dashboard follows new output by default. Use Up/Down or Page Up/Page Down to pause and scroll; End resumes following. The footer shows available controls. Resize the terminal to change the visible output area.
+
+## Configuration
+
+By default, `sup` reads `$XDG_CONFIG_HOME/sup/config.toml`, or `$HOME/.config/sup/config.toml` when `XDG_CONFIG_HOME` is unset. It never searches the current directory. If the default file is absent, embedded defaults from the shipped `config.toml` are used and shown by `sup plan`. An explicit missing `--config` path is an error.
+
+Create a user config with `sup config init`. It creates the destination exclusively and does not overwrite an existing file. TOML has schema version 1 and supports aliases, run retention settings, and jobs with argv commands, requirements, phase, optionality, log name, and authentication policy. Commands are argument vectors, not shell strings; use `sh -c` explicitly when a shell is required.
+
+See [config.toml](config.toml) for the complete default jobs and field examples.
+
+Migrate a legacy YAML config once, without overwriting either file:
 
 ```bash
-uv run --project /path/to/sup sup "$@"
+sup config migrate --from old-config.yaml --to config.toml
+sup --config config.toml plan
 ```
 
-## Usage
+The migration preserves command strings and settings. Direct Homebrew install, upgrade, and reinstall commands with legacy sudo preflight are changed to on-demand authentication with a notice. YAML is accepted only by this migration command; TOML is the runtime format.
 
-```bash
-uv run --project . sup --dry-run
-uv run --project . sup --list
-uv run --project . sup --only rustup,skills
-uv run --project . sup --skip brew,mas
-```
+The optional `skills` job requires `SUP_SKILLS_ROOT` to point to a checkout containing `Cargo.toml`, `Cargo.lock`, and `deps.yaml`. Set that environment variable in the shell that runs `sup`; the job is skipped when its optional requirements are absent.
 
-By default, `sup` reads `config.yaml` from the repository root. Use
-`--config /path/to/config.yaml` to run with a different config.
+## Authentication
 
-## Config
+Jobs configured for sudo ask through the in-dashboard password prompt only when a command requests authentication. SUP passes the password to that individual askpass request, then clears its buffer; it does not save or replay passwords. During active privileged jobs, SUP may refresh the operating-system sudo ticket noninteractively. Homebrew can invalidate a ticket before privileged work, and operating-system policy or an installer can still require another prompt. SUP does not change sudoers, PAM, or Homebrew.
 
-The config file contains optional selector aliases and a required `jobs` block:
-
-```yaml
-aliases:
-  rust:
-    - rustup
-
-jobs:
-  - name: rustup
-    label: Rust toolchain
-    phase: parallel
-    command:
-      - rustup
-      - update
-    required_commands:
-      - rustup
-    optional: true
-    log_name: rustup.log
-```
-
-Supported job keys:
-
-- `name`: stable selector used by `--only` and `--skip`.
-- `label`: display label. Defaults to `name`.
-- `phase`: `core` runs sequentially before `parallel` jobs.
-- `command`: argument vector to execute.
-- `required_commands`: commands that must exist in `PATH`.
-- `required_paths`: filesystem paths that must exist.
-- `required_env`: environment variables that must be set.
-- `optional`: skipped when requirements are missing if `true`; failed if
-  `false`.
-- `log_name`: filename under the current run log directory.
-- `sudo_preflight`: authenticate sudo through the dashboard overlay before
-  executing the job.
-
-`$HOME`, `$VAR`, and `${VAR}` placeholders in `command` and `required_paths`
-are expanded when the config is loaded. Missing required environment variables
-cause optional jobs to be skipped before execution.
-
-The default `skills` job builds and runs the public agent-skills project's Rust
-`skillctl` from its checkout with locked dependencies:
-
-```bash
-uv run --project . sup --only skills
-```
-
-It calls:
-
-```bash
-cargo run --quiet --locked --manifest-path "$HOME/.agents/skills/Cargo.toml" --bin skillctl -- sync --root "$HOME/.agents/skills"
-```
-
-If `cargo` or the skills project's `Cargo.toml`, `Cargo.lock`, or `deps.yaml` is
-missing, the optional `skills` job is skipped. The explicit root selects the
-skills checkout regardless of Sup's working directory. A separately installed
-`skillctl` binary is not required.
-
-The Node job closes pnpm's stdin so global updates cannot open build-approval
-prompts while output is captured. Existing build approvals still apply;
-unreviewed scripts stay disabled and are reported by pnpm. Approve required
-scripts separately with `pnpm approve-builds --global`.
-
-The Go tools job runs `env -u GOROOT gup update`. This removes an inherited
-`GOROOT` that may point at a deleted Homebrew version after the core upgrade
-phase. Go resolves its installation from the executable selected by `PATH`;
-`GOPATH`, `GOBIN`, and the parent shell environment stay unchanged. Custom
-configs that require an explicit `GOROOT` can use `gup update` directly.
-
-The Mac App Store job uses `mas upgrade --accurate --no-check-min-os --verbose`.
-It checks App Store download metadata, avoiding false negatives from missing
-or stale catalog entries. The App Store handles OS compatibility and may show
-dialogs for incompatible apps or account issues.
+Use `auth = "on-demand"` for Homebrew, `"preflight"` to validate sudo immediately before a job, or `"none"` to disable SUP authentication for that job. Plain terminal mode asks without echoing input. Without a terminal, commands can run until they need a password; SUP then fails that request rather than hanging.
 
 ## Logs
 
-Each real run writes logs under:
-
-```text
-~/.cache/sup/runs/<timestamp>/
-```
-
-Old run directories are cleaned up by default after 30 days. Use
-`--log-retention-days N` to change the retention window or `--no-log-cleanup`
-to disable cleanup for a run.
+Each run writes logs under `~/.cache/sup/runs/<run-id>/`. Logs contain complete child output; the in-memory dashboard history is bounded. Old run directories are cleaned after 30 days by default. Use `--log-retention-days N` to change the window or `--no-log-cleanup` to disable cleanup for a run.
 
 ## Development
 
 ```bash
-uv run python -m unittest discover -s tests
-uvx ruff format --check .
-uvx ruff check .
-uv run --locked yamllint --strict .
-uv build
+cargo fmt --all -- --check
+cargo clippy --locked --all-targets -- -D warnings
+cargo test --locked --all-targets
+cargo build --locked --release --bins
+uvx yamllint==1.38.0 --strict .
+actionlint
+sup plan
+sup list
 ```
 
-The GitHub Actions workflow runs Ruff formatting, Python linting, and yamllint
-on pull requests. YAML rules match homeserver: two-space indentation, block
-collections, and no line-length limit.
+Tests use explicit temporary configs and synthetic commands. Do not execute configured update jobs unless the user explicitly asks for a real update run; use `sup plan` to preview them.
+
+GitHub Actions runs formatting, Clippy, tests and release builds on Linux and macOS, plus YAML, reusable workflow, and Renovate configuration checks. YAML lint is pinned independently from the Rust package. YAML rules use two-space indentation, block collections, and no line-length limit.
