@@ -1,0 +1,124 @@
+# Optional skills job setup: set SUP_SKILLS_ROOT once in your shell profile to
+# the skills checkout directory before running `sup --only skills`.
+version = 1
+
+[aliases]
+brew = ["brew-link-node-tools", "brew-upgrade", "brew-relink-node-tools", "brew-cleanup"]
+zimfw = ["zimfw-upgrade", "zimfw-update"]
+cargo = ["cargo-install-update"]
+npm = ["node-package-managers"]
+pnpm = ["node-package-managers"]
+
+[run]
+retention_days = 30
+cleanup_logs = true
+
+[[jobs]]
+name = "brew-link-node-tools"
+label = "Homebrew node tool links"
+phase = "core"
+command = ["sh", "-c", "if brew list --formula node >/dev/null 2>&1; then brew link --overwrite node; fi"]
+required_commands = ["brew", "sh"]
+optional = true
+
+[[jobs]]
+name = "brew-upgrade"
+label = "Homebrew upgrade"
+phase = "core"
+command = ["brew", "upgrade", "--greedy", "--force"]
+required_commands = ["brew", "sudo"]
+optional = false
+auth = "on-demand"
+
+[[jobs]]
+name = "brew-relink-node-tools"
+label = "Homebrew node tool relinks"
+phase = "core"
+command = ["sh", "-c", "if brew list --formula node >/dev/null 2>&1; then brew link --overwrite node; fi"]
+required_commands = ["brew", "sh"]
+optional = true
+
+[[jobs]]
+name = "brew-cleanup"
+label = "Homebrew cleanup"
+phase = "core"
+command = ["brew", "cleanup", "--prune=all"]
+required_commands = ["brew"]
+optional = false
+
+[[jobs]]
+name = "zimfw-upgrade"
+label = "Zim upgrade"
+phase = "core"
+command = ["zsh", "-lc", "source \"$HOME/.zim/init.zsh\"; zimfw upgrade"]
+required_commands = ["zsh"]
+required_paths = ["$HOME/.zim/init.zsh"]
+optional = true
+
+[[jobs]]
+name = "zimfw-update"
+label = "Zim update"
+phase = "parallel"
+command = ["zsh", "-lc", "source \"$HOME/.zim/init.zsh\"; zimfw update"]
+required_commands = ["zsh"]
+required_paths = ["$HOME/.zim/init.zsh"]
+optional = true
+
+[[jobs]]
+name = "gup"
+label = "Go tools"
+phase = "parallel"
+command = ["env", "-u", "GOROOT", "gup", "update"]
+required_commands = ["env", "gup"]
+optional = true
+
+[[jobs]]
+name = "gcloud"
+label = "Google Cloud SDK"
+phase = "parallel"
+command = ["gcloud", "components", "update", "--quiet"]
+required_commands = ["gcloud"]
+optional = true
+
+[[jobs]]
+name = "mas"
+label = "Mac App Store"
+phase = "parallel"
+command = ["mas", "upgrade", "--accurate", "--no-check-min-os", "--verbose"]
+required_commands = ["mas", "sudo"]
+optional = true
+auth = "preflight"
+
+[[jobs]]
+name = "node-package-managers"
+label = "Node package managers"
+phase = "parallel"
+command = ["sh", "-c", "npm update --global && corepack install --global pnpm@latest && pnpm update --global </dev/null"]
+required_commands = ["sh", "npm", "corepack", "pnpm"]
+optional = true
+
+[[jobs]]
+name = "rustup"
+label = "Rust toolchain"
+phase = "parallel"
+command = ["sup-rust-update"]
+required_commands = ["rustup"]
+optional = true
+
+[[jobs]]
+name = "cargo-install-update"
+label = "Cargo installed crates"
+phase = "parallel"
+command = ["cargo", "install-update", "--all", "--git"]
+required_commands = ["cargo", "cargo-install-update"]
+optional = true
+
+[[jobs]]
+name = "skills"
+label = "Agent skills"
+phase = "parallel"
+command = ["cargo", "run", "--quiet", "--locked", "--manifest-path", "$SUP_SKILLS_ROOT/Cargo.toml", "--bin", "skillctl", "--", "sync", "--root", "$SUP_SKILLS_ROOT"]
+required_commands = ["cargo"]
+required_paths = ["$SUP_SKILLS_ROOT/Cargo.toml", "$SUP_SKILLS_ROOT/Cargo.lock", "$SUP_SKILLS_ROOT/deps.yaml"]
+required_env = ["SUP_SKILLS_ROOT"]
+optional = true
