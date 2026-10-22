@@ -7,10 +7,12 @@ scope=${scope##*/}
 /bin/ps -o pgid= -p $$ >> "$FIXTURE_ROOT/job-groups"
 if [ "${FIXTURE_SCOPE:-tty}" = parent ]; then scope=p$PPID; fi
 coords=0
-if [ -n "${SUP_AUTH_SOCKET:-}" ] && [ -n "${SUP_AUTH_TOKEN:-}" ]; then
-    coords=1
-    printf '%s\n%s\n' "$SUP_AUTH_SOCKET" "$SUP_AUTH_TOKEN" > "$FIXTURE_ROOT/coordinates"
-fi
+case "${SUDO_ASKPASS:-}" in
+    */askpass-*)
+        coords=1
+        printf '%s\n%s\n' "${SUDO_ASKPASS%/*}/s" "${SUDO_ASKPASS##*/askpass-}" > "$FIXTURE_ROOT/coordinates"
+        ;;
+esac
 printf 'sudo %s scope=%s coords=%s\n' "$*" "$scope" "$coords" >> "$FIXTURE_ROOT/trace"
 /usr/bin/env >> "$FIXTURE_ROOT/observed-environment"
 if [ "${FIXTURE_CANCEL_RETRY:-}" = yes ]; then
