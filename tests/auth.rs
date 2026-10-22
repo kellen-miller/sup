@@ -672,12 +672,29 @@ fn preflight_is_just_in_time_and_noninteractive_unavailable_optional_jobs_skip()
 }
 
 #[test]
-fn scrubbed_broker_environment_fails_promptly_with_attributed_bootstrap_error() {
+fn environment_scrubbed_to_sudo_askpass_still_reaches_the_broker() {
+    // Homebrew keeps SUDO_ASKPASS but drops other variables before running sudo.
     let fixture = Fixture::new();
     fixture.jobs(&job(
         "scrubber",
         "on-demand",
-        "['/bin/sh', '-c', '/usr/bin/env -i SUDO_ASKPASS=\"$SUDO_ASKPASS\" \"$SUDO_ASKPASS\" Password:']",
+        "['/bin/sh', '-c', '/usr/bin/env -i PATH=\"$PATH\" FIXTURE_ROOT=\"$FIXTURE_ROOT\" \
+         SUDO_ASKPASS=\"$SUDO_ASKPASS\" sudo -A -v']",
+    ));
+    let mut run = PtyRun::spawn(fixture.command());
+    run.until_prompt();
+    assert!(run.finish(&[SECRET], Duration::from_secs(5)).success());
+    fixture.assert_no_secret(&run.output);
+    fixture.assert_socket_removed();
+}
+
+#[test]
+fn askpass_outside_a_job_link_fails_promptly_with_attributed_bootstrap_error() {
+    let fixture = Fixture::new();
+    fixture.jobs(&job(
+        "scrubber",
+        "on-demand",
+        "['/bin/sh', '-c', '/bin/ln -s \"$SUDO_ASKPASS\" \"$FIXTURE_ROOT/copied\" && \"$FIXTURE_ROOT/copied\" Password:']",
     ));
     let output = bounded_output(fixture.command());
     assert_eq!(output.status.code(), Some(1));

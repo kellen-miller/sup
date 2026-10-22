@@ -25,8 +25,10 @@ const DIALOG_TIMEOUT: Duration = Duration::from_secs(120);
 const SUDO_TIMEOUT: Duration = Duration::from_secs(2);
 const REFRESH_INTERVAL: Duration = Duration::from_secs(30);
 const PROBE_DELAY: Duration = Duration::from_millis(250);
-const SOCKET_ENV: &str = "SUP_AUTH_SOCKET";
-const TOKEN_ENV: &str = "SUP_AUTH_TOKEN";
+// Tools such as Homebrew scrub the environment but keep SUDO_ASKPASS, so each job's helper path is a private
+// symlink whose name carries the job token and whose directory holds the broker socket.
+const HELPER_PREFIX: &str = "askpass-";
+const SOCKET_NAME: &str = "s";
 
 /// Fixed allocation, deliberately neither Clone nor Debug. All allocated bytes wipe on drop.
 pub struct Password {
@@ -143,7 +145,6 @@ pub struct AuthSession {
 pub struct JobAuthorization {
     token: Option<String>,
     state: Arc<Mutex<BrokerState>>,
-    socket: PathBuf,
     helper: PathBuf,
 }
 
@@ -204,7 +205,6 @@ impl AuthSession {
         let mut authorization = JobAuthorization {
             token: None,
             state: self.state.clone(),
-            socket: self.socket.clone(),
             helper: PathBuf::new(),
         };
         if job.auth == AuthMode::None {
@@ -227,8 +227,12 @@ impl AuthSession {
                 cancelled: None,
             },
         );
+        // Drop owns cleanup from here, including after a failed link.
+        authorization.helper = self.socket.with_file_name(format!("{HELPER_PREFIX}{token}"));
         authorization.token = Some(token);
-        authorization.helper = self.helper.clone();
+        drop(state);
+        std::os::unix::fs::symlink(&self.helper, &authorization.helper)
+            .map_err(|error| format!("cannot create askpass helper link: {error}"))?;
         Ok(authorization)
     }
 
@@ -266,7 +270,7 @@ fn create_broker_socket() -> Result<(TempDir, PathBuf, UnixListener), String> {
         .tempdir_in(temporary_root)
         .map_err(|error| format!("cannot create auth directory: {error}"))?;
     // Darwin sockaddr_un.sun_path is 104 bytes, including its trailing NUL.
-    if directory.path().join("s").as_os_str().as_encoded_bytes().len() >= 104 {
+    if directory.path().join(SOCKET_NAME).as_os_str().as_encoded_bytes().len() >= 104 {
         directory = tempfile::Builder::new()
             .prefix("sa-")
             .tempdir_in("/tmp")
@@ -275,7 +279,7 @@ fn create_broker_socket() -> Result<(TempDir, PathBuf, UnixListener), String> {
 
     fs::set_permissions(directory.path(), fs::Permissions::from_mode(0o700))
         .map_err(|error| format!("cannot secure auth directory: {error}"))?;
-    let socket = directory.path().join("s");
+    let socket = directory.path().join(SOCKET_NAME);
     let listener = UnixListener::bind(&socket).map_err(|error| format!("cannot bind auth socket: {error}"))?;
     fs::set_permissions(&socket, fs::Permissions::from_mode(0o600))
         .map_err(|error| format!("cannot secure auth socket: {error}"))?;
@@ -380,15 +384,9 @@ impl Drop for AuthSession {
 
 impl JobAuthorization {
     pub fn configure(&self, command: &mut Command) {
-        command
-            .env_remove("SUDO_ASKPASS")
-            .env_remove(SOCKET_ENV)
-            .env_remove(TOKEN_ENV);
-        if let Some(token) = &self.token {
-            command
-                .env("SUDO_ASKPASS", &self.helper)
-                .env(SOCKET_ENV, &self.socket)
-                .env(TOKEN_ENV, token);
+        command.env_remove("SUDO_ASKPASS");
+        if self.token.is_some() {
+            command.env("SUDO_ASKPASS", &self.helper);
         }
     }
 
@@ -406,6 +404,7 @@ impl Drop for JobAuthorization {
         let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
         if let Some(token) = &self.token {
             state.jobs.remove(token);
+            drop(fs::remove_file(&self.helper));
         }
 
         if state.jobs.is_empty() {
@@ -701,19 +700,23 @@ fn sanitize_prompt(bytes: &[u8]) -> String {
 }
 
 /// Askpass entry point: its stdout contains only the current supplied password.
+/// `invoked_as` is the per-job helper link that sudo executed, which locates the broker and names the job token.
 /// # Errors
 /// Returns an error when broker coordinates, communication, or password delivery fail.
-pub fn askpass(prompt: &str) -> Result<(), String> {
+pub fn askpass(invoked_as: &Path, prompt: &str) -> Result<(), String> {
     disable_core_dumps()?;
-    let socket =
-        std::env::var_os(SOCKET_ENV).ok_or("authentication-bootstrap error: missing private broker coordinates")?;
-    let token = std::env::var(TOKEN_ENV).map_err(|_| "authentication-bootstrap error: missing private job token")?;
-    if !Path::new(&socket).is_absolute() || token.len() != 64 || !token.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+    let token = invoked_as
+        .file_name()
+        .and_then(|name| name.to_str())
+        .and_then(|name| name.strip_prefix(HELPER_PREFIX))
+        .ok_or("authentication-bootstrap error: missing private broker coordinates")?;
+    let socket = invoked_as.with_file_name(SOCKET_NAME);
+    if !invoked_as.is_absolute() || token.len() != 64 || !token.bytes().all(|byte| byte.is_ascii_hexdigit()) {
         return Err("authentication-bootstrap error: invalid broker coordinates".into());
     }
 
-    let address = nix::sys::socket::UnixAddr::new(Path::new(&socket))
-        .map_err(|_| "authentication-bootstrap error: invalid socket path")?;
+    let address =
+        nix::sys::socket::UnixAddr::new(&socket).map_err(|_| "authentication-bootstrap error: invalid socket path")?;
     let descriptor = nix::sys::socket::socket(
         nix::sys::socket::AddressFamily::Unix,
         nix::sys::socket::SockType::Stream,
@@ -802,8 +805,6 @@ fn sudo_status(
         .stdout(Stdio::null())
         .stderr(Stdio::null())
         .env_remove("SUDO_ASKPASS")
-        .env_remove(SOCKET_ENV)
-        .env_remove(TOKEN_ENV)
         .process_group(0);
     if let Some(authorization) = authorization {
         authorization.configure(&mut command);
