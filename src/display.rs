@@ -1,8 +1,11 @@
+mod output;
+
 use crate::auth::{AuthRequest, Password, PasswordReply, PlainPrompt};
 use crate::config::Job;
 use crate::runner::{Cancellation, JobResult, JobStatus, RunEvent};
 use crossterm::event::{self, Event, KeyCode, KeyModifiers, MouseEventKind};
 use crossterm::execute;
+use output::OutputParser;
 use ratatui::Terminal;
 use ratatui::backend::CrosstermBackend;
 use ratatui::layout::{Alignment, Constraint, Direction, Layout, Rect};
@@ -18,19 +21,79 @@ use zeroize::Zeroize;
 const HISTORY_EVENTS: usize = 10_000;
 const HISTORY_BYTES: usize = 8 * 1024 * 1024;
 const EVENT_BYTES: usize = 16 * 1024;
+// A full pipe read can complete up to three UTF-8 bytes retained from the previous read.
+const PIPE_EVENT_BYTES: usize = EVENT_BYTES + 3;
+const TRUNCATION_MARKER: &str = " … [event truncated]";
 
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub struct OutputRecord {
-    pub text: String,
-    age: u64,
+struct OutputStyle {
+    start: usize,
+    style: Style,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct OutputRecord {
+    pub text: String,
+    styles: Vec<OutputStyle>,
+    age: u64,
+    truncated: bool,
+}
+
+impl OutputRecord {
+    /// Storage charged to pane history, including text, styles and the record.
+    pub fn storage_bytes(&self) -> usize {
+        size_of::<Self>() + self.text.capacity() + self.styles.capacity() * size_of::<OutputStyle>()
+    }
+
+    fn push(&mut self, character: char, style: Style) {
+        if self.styles.last().map(|run| run.style) != Some(style) {
+            self.styles.push(OutputStyle {
+                start: self.text.len(),
+                style,
+            });
+        }
+
+        self.text.push(character);
+    }
+
+    fn truncate(&mut self) {
+        if self.truncated {
+            return;
+        }
+
+        let mut end = self.text.len().min(EVENT_BYTES - TRUNCATION_MARKER.len());
+        while !self.text.is_char_boundary(end) {
+            end -= 1;
+        }
+
+        self.text.truncate(end);
+        self.styles.retain(|run| run.start < end);
+        for character in TRUNCATION_MARKER.chars() {
+            self.push(character, Style::default());
+        }
+
+        self.truncated = true;
+    }
+
+    fn line(&self) -> Line<'_> {
+        Line::from(
+            self.styles
+                .iter()
+                .enumerate()
+                .map(|(index, run)| {
+                    let end = self.styles.get(index + 1).map_or(self.text.len(), |next| next.start);
+                    Span::styled(&self.text[run.start..end], run.style)
+                })
+                .collect::<Vec<_>>(),
+        )
+    }
+}
+
 pub struct JobPane {
     records: VecDeque<OutputRecord>,
     bytes: usize,
     pending: Option<usize>,
-    filter: OutputFilter,
+    filter: OutputParser,
     anchor: Option<usize>,
     following: bool,
     height: usize,
@@ -42,7 +105,7 @@ impl Default for JobPane {
             records: VecDeque::new(),
             bytes: 0,
             pending: None,
-            filter: OutputFilter::default(),
+            filter: OutputParser::default(),
             anchor: None,
             following: true,
             height: 1,
@@ -52,50 +115,88 @@ impl Default for JobPane {
 
 impl JobPane {
     fn push(&mut self, text: &str, age: &mut u64) {
-        let text = self.filter.clean(text);
-        if text.is_empty() {
-            return;
+        let first = self.pending.unwrap_or(self.records.len());
+        let mut current = self.pending.take();
+        if let Some(index) = current {
+            self.bytes = self.bytes.saturating_sub(self.records[index].storage_bytes());
         }
 
-        let pending = self.pending.take();
-        let mut combined = pending
-            .and_then(|index| self.records.get(index))
-            .map(|record| record.text.clone())
-            .unwrap_or_default();
-        combined.push_str(&text);
-        let safe = truncate_event(normalize_lines(&combined));
-        let mut lines = safe.split_terminator('\n').peekable();
-        if let Some(index) = pending {
-            if let Some(line) = lines.next() {
-                let record = &mut self.records[index];
-                self.bytes = self.bytes.saturating_sub(record.text.len());
-                record.text = line.to_owned();
-                self.bytes += record.text.len();
-                if lines.peek().is_none() && !safe.ends_with('\n') {
-                    self.pending = Some(index);
+        // Ordinary pipe chunks fit completely; oversized events reserve diagnostic space.
+        let limit = if text.len() > PIPE_EVENT_BYTES {
+            EVENT_BYTES - TRUNCATION_MARKER.len()
+        } else {
+            PIPE_EVENT_BYTES
+        };
+        let mut used = 0;
+        let mut truncated = false;
+        let mut ended_line = false;
+        self.filter.parse(text, |character, style| {
+            ended_line = character == '\n';
+            if truncated {
+                return;
+            }
+
+            if character == '\r' {
+                if let Some(index) = current {
+                    let record = &mut self.records[index];
+                    record.text.clear();
+                    record.styles.clear();
+                    record.truncated = false;
                 }
-            } else {
-                self.bytes = self.bytes.saturating_sub(self.records[index].text.len());
-                self.records[index].text.clear();
+
+                return;
             }
+
+            if used + character.len_utf8() > limit {
+                truncated = true;
+                return;
+            }
+
+            used += character.len_utf8();
+            let index = *current.get_or_insert_with(|| {
+                self.records.push_back(OutputRecord {
+                    age: *age,
+                    ..OutputRecord::default()
+                });
+                *age = age.saturating_add(1);
+                self.records.len() - 1
+            });
+            if character == '\n' {
+                current = None;
+                return;
+            }
+
+            let record = &mut self.records[index];
+            if record.truncated {
+                return;
+            }
+
+            if record.text.len() + character.len_utf8() > EVENT_BYTES {
+                record.truncate();
+            } else {
+                record.push(character, style);
+            }
+        });
+        if truncated
+            && let Some(index) = current
+                .or_else(|| self.records.len().checked_sub(1))
+                .filter(|index| *index >= first)
+        {
+            self.records[index].truncate();
+            current = (!ended_line).then_some(index);
         }
 
-        while let Some(line) = lines.next() {
-            self.bytes += line.len();
-            self.records.push_back(OutputRecord {
-                text: line.to_owned(),
-                age: *age,
-            });
-            *age = age.saturating_add(1);
-            if lines.peek().is_none() && !safe.ends_with('\n') {
-                self.pending = Some(self.records.len() - 1);
-            }
+        self.pending = current;
+        for record in self.records.iter_mut().skip(first) {
+            record.text.shrink_to_fit();
+            record.styles.shrink_to_fit();
+            self.bytes += record.storage_bytes();
         }
     }
 
     fn evict_oldest(&mut self) {
         if let Some(record) = self.records.pop_front() {
-            self.bytes = self.bytes.saturating_sub(record.text.len());
+            self.bytes = self.bytes.saturating_sub(record.storage_bytes());
             self.pending = self.pending.and_then(|index| index.checked_sub(1));
             self.anchor = self.anchor.map(|index| index.saturating_sub(1));
         }
@@ -110,7 +211,6 @@ impl JobPane {
     }
 }
 
-#[derive(Clone, Debug)]
 pub struct Dashboard {
     panes: HashMap<String, JobPane>,
     statuses: HashMap<String, String>,
@@ -276,125 +376,6 @@ impl Dashboard {
     }
 }
 
-#[derive(Clone, Copy, Debug, Default)]
-enum EscapeState {
-    #[default]
-    Text,
-    Escape,
-    Csi,
-    Osc,
-    OscEscape,
-}
-
-#[derive(Clone, Debug, Default)]
-struct OutputFilter {
-    escape: EscapeState,
-    carriage_return: bool,
-}
-
-impl OutputFilter {
-    fn clean(&mut self, input: &str) -> String {
-        let mut output = String::with_capacity(input.len());
-        for character in input.chars() {
-            match self.escape {
-                EscapeState::Escape => {
-                    self.escape = match character {
-                        '[' => EscapeState::Csi,
-                        ']' | 'P' | '^' | '_' => EscapeState::Osc,
-                        _ => EscapeState::Text,
-                    };
-                    continue;
-                }
-                EscapeState::Csi => {
-                    if ('@'..='~').contains(&character) {
-                        self.escape = EscapeState::Text;
-                    }
-
-                    continue;
-                }
-                EscapeState::Osc | EscapeState::OscEscape => {
-                    self.escape = match character {
-                        '\x07' => EscapeState::Text,
-                        '\\' if matches!(self.escape, EscapeState::OscEscape) => EscapeState::Text,
-                        '\x1b' => EscapeState::OscEscape,
-                        _ => EscapeState::Osc,
-                    };
-                    continue;
-                }
-                EscapeState::Text => {}
-            }
-
-            if character == '\x1b' {
-                self.escape = EscapeState::Escape;
-                continue;
-            }
-
-            if self.carriage_return {
-                self.carriage_return = false;
-                if character != '\n' {
-                    output.push('\r');
-                }
-            }
-
-            match character {
-                '\r' => self.carriage_return = true,
-                '\n' => output.push('\n'),
-                '\t' => output.push(' '),
-                character if !character.is_control() => output.push(character),
-                _ => {}
-            }
-        }
-
-        output
-    }
-}
-
-fn normalize_lines(input: &str) -> String {
-    let mut output = String::with_capacity(input.len());
-    let mut carriage = String::new();
-    for character in input.chars() {
-        if character == '\r' {
-            carriage.clear();
-            continue;
-        }
-        if character == '\n' {
-            output.push_str(&carriage);
-            output.push('\n');
-            carriage.clear();
-            continue;
-        }
-        if !character.is_control() || character == '\t' {
-            if character == '\t' {
-                carriage.push(' ');
-            } else {
-                carriage.push(character);
-            }
-        }
-    }
-    output.push_str(&carriage);
-    output
-}
-
-fn truncate_event(mut text: String) -> String {
-    if text.len() <= EVENT_BYTES {
-        return text;
-    }
-
-    let marker = if text.ends_with('\n') {
-        " … [event truncated]\n"
-    } else {
-        " … [event truncated]"
-    };
-    let mut end = EVENT_BYTES - marker.len();
-    while !text.is_char_boundary(end) {
-        end -= 1;
-    }
-
-    text.truncate(end);
-    text.push_str(marker);
-    text
-}
-
 pub fn render(frame: &mut ratatui::Frame<'_>, dashboard: &mut Dashboard, jobs: &[Job]) {
     let area = frame.area();
     if area.width == 0 || area.height == 0 {
@@ -558,7 +539,10 @@ fn render_pane(frame: &mut ratatui::Frame<'_>, area: Rect, pane: &mut JobPane, j
     let state = if pane.following { "live" } else { "paused" };
     let marker = if focused { "* " } else { "" };
     let block = Block::default()
-        .title(format!(" {marker}{} ({}) · {state} ", job.label, job.name))
+        .title(Span::styled(
+            format!(" {marker}{} ({}) · {state} ", job.label, job.name),
+            Style::default().fg(tokyo_fg()),
+        ))
         .borders(Borders::ALL)
         .border_style(Style::default().fg(if focused { tokyo_cyan() } else { tokyo_panel() }));
     let inner = block.inner(area);
@@ -575,7 +559,7 @@ fn render_pane(frame: &mut ratatui::Frame<'_>, area: Rect, pane: &mut JobPane, j
         .iter()
         .skip(start)
         .take(last.saturating_sub(start) + 1)
-        .map(|record| Line::raw(record.text.as_str()))
+        .map(OutputRecord::line)
         .collect();
     let mut padded = vec![Line::default(); pane.height.saturating_sub(lines.len())];
     padded.extend(lines);
@@ -776,7 +760,7 @@ fn plain_run(
 ) -> Result<Option<std::path::PathBuf>, String> {
     let mut prompt = PlainPrompt::new();
     let mut log_dir = None;
-    let mut filters: HashMap<String, OutputFilter> = HashMap::new();
+    let mut filters: HashMap<String, OutputParser> = HashMap::new();
     loop {
         while let Ok(request) = auth_rx.try_recv() {
             if io::stdin().is_terminal() {
@@ -791,7 +775,7 @@ fn plain_run(
             Ok(RunEvent::Started(name)) => println!("Running {name}"),
             Ok(RunEvent::Output { job, text }) => {
                 let text = filters.entry(job.clone()).or_default().clean(&text);
-                print!("[{job}] {}", normalize_lines(&text));
+                print!("[{job}] {}", text);
             }
             Ok(RunEvent::Finished(result)) => {
                 filters.remove(&result.job.name);
@@ -866,7 +850,7 @@ fn print_log_tail(path: &std::path::Path, tail_lines: usize) {
         eprintln!("  cannot read log {}: {error}", path.display());
         return;
     }
-    let tail = normalize_lines(&OutputFilter::default().clean(&String::from_utf8_lossy(&bytes)));
+    let tail = OutputParser::default().clean(&String::from_utf8_lossy(&bytes));
     for line in tail
         .lines()
         .rev()

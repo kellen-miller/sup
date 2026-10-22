@@ -22,6 +22,7 @@ pub struct RunOptions {
     pub home: PathBuf,
     pub retention_days: i64,
     pub cleanup_logs: bool,
+    pub request_color: bool,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -139,7 +140,9 @@ pub fn run(
             cancelled(job, "run cancelled")
         } else {
             match prepare(job, &run_dir, &cancellation) {
-                Ok(Some((path, file))) => execute(job, path, file, &events, &auth, &cancellation),
+                Ok(Some((path, file))) => {
+                    execute(job, path, file, &events, &auth, &cancellation, options.request_color)
+                }
                 Ok(None) => requirement_result(job, &run_dir),
                 Err(result) => *result,
             }
@@ -178,7 +181,7 @@ pub fn run(
                 index,
                 job,
                 scope.spawn(move || {
-                    let result = execute(job, path, file, &events, auth, &cancellation);
+                    let result = execute(job, path, file, &events, auth, &cancellation, options.request_color);
                     notify(&events, RunEvent::Finished(Box::new(result.clone())));
                     result
                 }),
@@ -302,6 +305,7 @@ fn execute(
     events: &mpsc::SyncSender<RunEvent>,
     auth: &AuthSession,
     cancellation: &Cancellation,
+    request_color: bool,
 ) -> JobResult {
     let (authorization, resolved) = match authorize_job(job, &log_path, auth, cancellation) {
         Ok(job) => job,
@@ -311,6 +315,7 @@ fn execute(
     let mut command = Command::new(&resolved[0]);
     command.args(&resolved[1..]).stdin(Stdio::null());
     authorization.configure(&mut command);
+    configure_output_colors(&mut command, request_color);
     let (mut reader, writer) = match output_pipe() {
         Ok(pipe) => pipe,
         Err(error) => return failed(job, &error, Some(1), Some(log_path), Duration::ZERO),
@@ -333,8 +338,8 @@ fn execute(
     #[cfg(unix)]
     command.process_group(0);
     let started = Instant::now();
-    let child = match command.spawn() {
-        Ok(child) => child,
+    let pid = match command.spawn() {
+        Ok(child) => child.id() as i32,
         Err(error) => {
             return failed(
                 job,
@@ -346,8 +351,6 @@ fn execute(
         }
     };
     drop(command);
-    let pid = child.id() as i32;
-    drop(child);
     cancellation.register(pid);
     let log = Arc::new(Mutex::new(log));
     let reader_log = log.clone();
@@ -383,6 +386,23 @@ fn execute(
         elapsed,
         log_path: Some(log_path),
         reason: String::new(),
+    }
+}
+
+fn configure_output_colors(command: &mut Command, request_color: bool) {
+    if request_color && std::env::var_os("NO_COLOR").is_none_or(|value| value.is_empty()) {
+        for (name, value) in [
+            ("HOMEBREW_COLOR", "1"),
+            ("FORCE_COLOR", "1"),
+            ("CLICOLOR_FORCE", "1"),
+            ("CARGO_TERM_COLOR", "always"),
+        ] {
+            if std::env::var_os(name).is_none()
+                && (name != "HOMEBREW_COLOR" || std::env::var_os("HOMEBREW_NO_COLOR").is_none())
+            {
+                command.env(name, value);
+            }
+        }
     }
 }
 
