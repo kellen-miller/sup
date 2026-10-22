@@ -2,6 +2,8 @@
 
 use ratatui::Terminal;
 use ratatui::backend::TestBackend;
+use ratatui::buffer::{Buffer, Cell};
+use ratatui::style::{Color, Modifier};
 use std::path::PathBuf;
 use std::time::Duration;
 use sup::config::{AuthMode, Job};
@@ -61,6 +63,27 @@ fn screen(dashboard: &mut Dashboard, jobs: &[Job], width: u16, height: u16) -> V
         .collect()
 }
 
+fn rendered(dashboard: &mut Dashboard, jobs: &[Job]) -> Buffer {
+    let mut terminal = Terminal::new(TestBackend::new(80, 24)).unwrap();
+    terminal
+        .draw(|frame| sup::display::render(frame, dashboard, jobs))
+        .unwrap();
+    terminal.backend().buffer().clone()
+}
+
+fn text_cell<'a>(buffer: &'a Buffer, text: &str) -> &'a Cell {
+    for row in 0..buffer.area.height {
+        let line: String = (0..buffer.area.width)
+            .map(|column| buffer[(column, row)].symbol())
+            .collect();
+        if let Some(offset) = line.find(text) {
+            return &buffer[(line[..offset].chars().count() as u16, row)];
+        }
+    }
+
+    panic!("missing text: {text}");
+}
+
 #[test]
 fn named_streams_stay_in_separate_panes_and_finished_panes_release_space() {
     let jobs = [job("alpha"), job("beta")];
@@ -81,6 +104,48 @@ fn named_streams_stay_in_separate_panes_and_finished_panes_release_space() {
     assert!(!rows.iter().any(|row| row.contains("ALPHA-ONLY")));
     assert!(rows.iter().any(|row| row.contains(&"expanded".repeat(8))));
     assert!(rows.iter().any(|row| row.contains("failed")));
+}
+
+#[test]
+fn regression_inactive_pane_labels_keep_readable_contrast() {
+    let jobs = [job("alpha"), job("beta")];
+    let mut dashboard = started(&jobs);
+    let mut terminal = Terminal::new(TestBackend::new(80, 24)).unwrap();
+    terminal
+        .draw(|frame| sup::display::render(frame, &mut dashboard, &jobs))
+        .unwrap();
+    let buffer = terminal.backend().buffer();
+    for label in ["Label beta (beta)", "Label alpha (alpha)"] {
+        let (column, row) = (0..24)
+            .find_map(|row| {
+                let line: String = (0..80).map(|column| buffer[(column, row)].symbol()).collect();
+                line.find(label)
+                    .map(|offset| (line[..offset].chars().count() as u16, row))
+            })
+            .unwrap();
+        assert_eq!(buffer[(column, row)].fg, Color::Rgb(192, 202, 245), "{label}");
+    }
+}
+
+#[test]
+fn regression_pane_output_keeps_command_colors() {
+    let jobs = [job("build")];
+    let mut dashboard = started(&jobs);
+    output(&mut dashboard, "build", "\x1b[31mred\x1b[0m default\n");
+    let mut terminal = Terminal::new(TestBackend::new(80, 24)).unwrap();
+    terminal
+        .draw(|frame| sup::display::render(frame, &mut dashboard, &jobs))
+        .unwrap();
+    let buffer = terminal.backend().buffer();
+    let (column, row) = (0..24)
+        .find_map(|row| {
+            let line: String = (0..80).map(|column| buffer[(column, row)].symbol()).collect();
+            line.find("red default")
+                .map(|offset| (line[..offset].chars().count() as u16, row))
+        })
+        .unwrap();
+    assert_eq!(buffer[(column, row)].fg, Color::Red);
+    assert_eq!(buffer[(column + 4, row)].fg, Color::Rgb(192, 202, 245));
 }
 
 #[test]
@@ -242,7 +307,7 @@ fn history_caps_aggregate_records_bytes_and_each_event_then_releases_on_finish()
     let bytes: usize = jobs
         .iter()
         .flat_map(|job| dashboard.pane(&job.name).unwrap().records())
-        .map(|record| record.text.len())
+        .map(sup::display::OutputRecord::storage_bytes)
         .sum();
     assert!(bytes <= 8 * 1024 * 1024);
     assert!(bytes > 8 * 1024 * 1024 - 32_000);
@@ -371,5 +436,359 @@ fn grid_minimum_boundaries_change_rendered_pane_count() {
             .filter(|job| frame.contains(&format!("({})", job.name)))
             .count();
         assert_eq!(pane_headings, expected, "{width}x{height}: {frame}");
+    }
+}
+
+#[test]
+fn streaming_styles_persist_across_chunks_lines_and_stay_per_job() {
+    let jobs = [job("alpha"), job("beta")];
+    let mut dashboard = started(&jobs);
+    output(&mut dashboard, "alpha", "\x1b[3");
+    output(&mut dashboard, "beta", "PLAIN\n");
+    output(&mut dashboard, "alpha", "1;1;4mRED\nCAR");
+    output(&mut dashboard, "alpha", "RY\x1b[22;24;39mDEFAULT\n");
+    let buffer = rendered(&mut dashboard, &jobs);
+    for text in ["RED", "CARRY"] {
+        let cell = text_cell(&buffer, text);
+        assert_eq!(cell.fg, Color::Red);
+        assert!(cell.modifier.contains(Modifier::BOLD | Modifier::UNDERLINED));
+    }
+
+    for text in ["PLAIN", "DEFAULT"] {
+        let cell = text_cell(&buffer, text);
+        assert_eq!(cell.fg, Color::Rgb(192, 202, 245));
+        assert!(!cell.modifier.intersects(Modifier::BOLD | Modifier::UNDERLINED));
+    }
+}
+
+struct ColorSample {
+    sequence: &'static str,
+    label: &'static str,
+    foreground: Color,
+    background: Color,
+    modifiers: Modifier,
+}
+
+#[test]
+fn rendered_palette_backgrounds_modifiers_and_resets_match_sgr() {
+    let jobs = [job("tool")];
+    let mut dashboard = started(&jobs);
+    let samples = [
+        ColorSample {
+            sequence: "\x1b[31;44m",
+            label: "BASIC",
+            foreground: Color::Red,
+            background: Color::Blue,
+            modifiers: Modifier::empty(),
+        },
+        ColorSample {
+            sequence: "\x1b[96;101m",
+            label: "BRIGHT",
+            foreground: Color::LightCyan,
+            background: Color::LightRed,
+            modifiers: Modifier::empty(),
+        },
+        ColorSample {
+            sequence: "\x1b[38;5;202;48;5;17m",
+            label: "INDEXED",
+            foreground: Color::Indexed(202),
+            background: Color::Indexed(17),
+            modifiers: Modifier::empty(),
+        },
+        ColorSample {
+            sequence: "\x1b[38;2;10;20;30;48;2;40;50;60m",
+            label: "TRUECOLOR",
+            foreground: Color::Rgb(10, 20, 30),
+            background: Color::Rgb(40, 50, 60),
+            modifiers: Modifier::empty(),
+        },
+        ColorSample {
+            sequence: "\x1b[38:2::70:80:90;48:5:19m",
+            label: "COLON",
+            foreground: Color::Rgb(70, 80, 90),
+            background: Color::Indexed(19),
+            modifiers: Modifier::empty(),
+        },
+        ColorSample {
+            sequence: "\x1b[1;2;3;4;5;6;7;9m",
+            label: "MODIFIERS",
+            foreground: Color::Rgb(192, 202, 245),
+            background: Color::Rgb(26, 27, 38),
+            modifiers: Modifier::BOLD
+                .union(Modifier::DIM)
+                .union(Modifier::ITALIC)
+                .union(Modifier::UNDERLINED)
+                .union(Modifier::SLOW_BLINK)
+                .union(Modifier::RAPID_BLINK)
+                .union(Modifier::REVERSED)
+                .union(Modifier::CROSSED_OUT),
+        },
+    ];
+    for sample in &samples {
+        output(
+            &mut dashboard,
+            "tool",
+            &format!("{}{}\x1b[0m\n", sample.sequence, sample.label),
+        );
+    }
+
+    output(
+        &mut dashboard,
+        "tool",
+        "\x1b[31;44;1;2;3;4;5;6;7;8;9m\x1b[39;49;22;23;24;25;27;28;29mOFF\n",
+    );
+    let buffer = rendered(&mut dashboard, &jobs);
+    for sample in &samples {
+        let cell = text_cell(&buffer, sample.label);
+        assert_eq!(cell.fg, sample.foreground, "{}", sample.label);
+        assert_eq!(cell.bg, sample.background, "{}", sample.label);
+        assert_eq!(cell.modifier, sample.modifiers, "{}", sample.label);
+    }
+
+    let reset = text_cell(&buffer, "OFF");
+    assert_eq!(reset.fg, Color::Rgb(192, 202, 245));
+    assert_eq!(reset.bg, Color::Rgb(26, 27, 38));
+    assert_eq!(reset.modifier, Modifier::empty());
+}
+
+#[test]
+fn progress_replaces_text_and_styles_and_scroll_keeps_original_colors() {
+    let jobs: Vec<Job> = (0..5).map(|index| job(&format!("job{index}"))).collect();
+    let mut dashboard = started(&jobs);
+    output(&mut dashboard, "job4", "\x1b[31mOLD\r");
+    output(&mut dashboard, "job4", "\x1b[32mNEW\r");
+    output(&mut dashboard, "job4", "\nPART");
+    rendered(&mut dashboard, &jobs);
+    assert!(dashboard.pane("job4").unwrap().records()[0].text == "NEW");
+    dashboard.change_page(99);
+    let buffer = rendered(&mut dashboard, &jobs);
+    assert_eq!(text_cell(&buffer, "NEW").fg, Color::Green);
+    assert_eq!(text_cell(&buffer, "PART").fg, Color::Green);
+    dashboard.scroll(-1);
+    for index in 0..80 {
+        output(&mut dashboard, "job4", &format!("\n\x1b[34mrow-{index}"));
+    }
+
+    let buffer = rendered(&mut dashboard, &jobs);
+    assert_eq!(text_cell(&buffer, "NEW").fg, Color::Green);
+    dashboard.resume();
+    let buffer = rendered(&mut dashboard, &jobs);
+    assert_eq!(text_cell(&buffer, "row-79").fg, Color::Blue);
+}
+
+#[test]
+fn control_strings_malformed_and_long_sequences_do_not_reach_the_screen() {
+    let jobs = [job("tool")];
+    let mut dashboard = started(&jobs);
+    output(&mut dashboard, "tool", "\x1b]52;c;SECRET");
+    output(&mut dashboard, "tool", &"ignored".repeat(100_000));
+    output(
+        &mut dashboard,
+        "tool",
+        "\x1b\\\x1bPignored\x1b\\\x1b^ignored\x1b\\\x1b_ignored\x1b\\\x1b[2J\x1b[H",
+    );
+    output(&mut dashboard, "tool", &format!("\x1b[{}mSAFE", "31;".repeat(100_000)));
+    output(&mut dashboard, "tool", "\x1b[38;2;999;0;0mRANGE\x1b[?31mPRIVATE\n");
+    let records = dashboard.pane("tool").unwrap().records();
+    assert_eq!(records.len(), 1);
+    assert_eq!(records[0].text, "SAFERANGEPRIVATE");
+    assert!(records[0].storage_bytes() < 1024);
+    let buffer = rendered(&mut dashboard, &jobs);
+    assert_eq!(text_cell(&buffer, "SAFE").fg, Color::Rgb(192, 202, 245));
+    assert_eq!(text_cell(&buffer, "RANGE").fg, Color::Rgb(192, 202, 245));
+    assert_eq!(text_cell(&buffer, "PRIVATE").fg, Color::Rgb(192, 202, 245));
+}
+
+#[test]
+fn style_metadata_and_repeated_partial_events_share_output_budgets() {
+    let jobs = [job("tool")];
+    let mut dashboard = started(&jobs);
+    let many_styles: String = (0..2_000).map(|index| format!("\x1b[38;5;{}mx", index % 256)).collect();
+    for _ in 0..20 {
+        output(&mut dashboard, "tool", &many_styles);
+    }
+
+    let record = &dashboard.pane("tool").unwrap().records()[0];
+    assert!(record.text.contains("event truncated"));
+    assert!(record.text.len() <= 16 * 1024);
+    assert!(record.storage_bytes() > record.text.len());
+    output(&mut dashboard, "tool", "\r\x1b[32mRECOVERED\n");
+    assert_eq!(dashboard.pane("tool").unwrap().records()[0].text, "RECOVERED");
+    for _ in 0..800 {
+        output(&mut dashboard, "tool", &format!("{many_styles}\n"));
+    }
+
+    let bytes: usize = dashboard
+        .pane("tool")
+        .unwrap()
+        .records()
+        .iter()
+        .map(sup::display::OutputRecord::storage_bytes)
+        .sum();
+    assert!(bytes <= 8 * 1024 * 1024);
+    assert!(bytes > 8 * 1024 * 1024 - 200_000);
+    let text_bytes: usize = dashboard
+        .pane("tool")
+        .unwrap()
+        .records()
+        .iter()
+        .map(|record| record.text.len())
+        .sum();
+    assert!(text_bytes < bytes / 2);
+}
+
+#[test]
+fn truncated_partial_line_recovers_after_newline_in_next_event() {
+    let jobs = [job("tool")];
+    let mut dashboard = started(&jobs);
+    output(&mut dashboard, "tool", &"x".repeat(16 * 1024));
+    output(&mut dashboard, "tool", "overflow");
+    assert!(
+        dashboard.pane("tool").unwrap().records()[0]
+            .text
+            .contains("event truncated")
+    );
+    output(&mut dashboard, "tool", "\nNEXT\n");
+    let records = dashboard.pane("tool").unwrap().records();
+    assert_eq!(records.len(), 2);
+    assert_eq!(records[1].text, "NEXT");
+    assert!(records[0].text.len() <= 16 * 1024);
+}
+
+#[test]
+fn repeated_truncated_lines_recover_without_growing_old_records_or_losing_style() {
+    let jobs = [job("tool")];
+    let mut dashboard = started(&jobs);
+    let large = "x".repeat(20 * 1024);
+    output(&mut dashboard, "tool", "\x1b[31m");
+    output(&mut dashboard, "tool", &large);
+    let original = dashboard.pane("tool").unwrap().records()[0].clone();
+    for index in 0..32 {
+        output(&mut dashboard, "tool", &format!("\nNEXT-{index}\n"));
+        assert_eq!(
+            dashboard.pane("tool").unwrap().records().back().unwrap().text,
+            format!("NEXT-{index}")
+        );
+        output(&mut dashboard, "tool", &large);
+    }
+
+    output(&mut dashboard, "tool", "\nTAIL\n");
+    let records = dashboard.pane("tool").unwrap().records();
+    assert_eq!(records.len(), 66);
+    assert_eq!(records[0], original);
+    assert!(records.iter().all(|record| record.text.len() <= 16 * 1024));
+    assert_eq!(text_cell(&rendered(&mut dashboard, &jobs), "TAIL").fg, Color::Red);
+}
+
+#[test]
+fn recovery_keeps_new_text_budget_across_line_boundaries() {
+    let jobs = [job("tool")];
+    let mut dashboard = started(&jobs);
+    output(&mut dashboard, "tool", &"x".repeat(16 * 1024));
+    let original = dashboard.pane("tool").unwrap().records()[0].clone();
+    output(&mut dashboard, "tool", &format!("\n{}", "ROW\n".repeat(10_000)));
+    let records = dashboard.pane("tool").unwrap().records();
+    assert_eq!(records[0], original);
+    assert_eq!(records[1].text, "ROW");
+    let new_bytes: usize = records.iter().skip(1).map(|record| record.text.len()).sum();
+    assert!(new_bytes <= 16 * 1024);
+    assert!(records.back().unwrap().text.contains("event truncated"));
+}
+
+#[test]
+fn pipe_sized_plain_multiline_chunk_keeps_every_line() {
+    let jobs = [job("tool")];
+    let mut dashboard = started(&jobs);
+    let payload: String = (0..200)
+        .map(|index| format!("line-{index:03} {}\n", "x".repeat(70)))
+        .collect();
+    assert!(payload.len() <= 16 * 1024);
+    output(&mut dashboard, "tool", &payload);
+    let records = dashboard.pane("tool").unwrap().records();
+    assert_eq!(records.len(), 200);
+    assert_eq!(records.back().unwrap().text, format!("line-199 {}", "x".repeat(70)));
+    assert!(records.iter().all(|record| !record.text.contains("event truncated")));
+}
+
+#[test]
+fn pipe_sized_colored_multiline_chunk_keeps_every_line() {
+    let jobs = [job("tool")];
+    let mut dashboard = started(&jobs);
+    let payload: String = (0..200)
+        .map(|index| format!("\x1b[32mrow-{index:03} {}\x1b[0m\n", "x".repeat(60)))
+        .collect();
+    assert!(payload.len() <= 16 * 1024);
+    output(&mut dashboard, "tool", &payload);
+    let records = dashboard.pane("tool").unwrap().records();
+    assert_eq!(records.len(), 200);
+    assert!(records.iter().all(|record| !record.text.contains("event truncated")));
+    assert_eq!(text_cell(&rendered(&mut dashboard, &jobs), "row-199").fg, Color::Green);
+}
+
+#[test]
+fn pipe_sized_empty_line_burst_uses_record_retention_without_false_truncation() {
+    let jobs = [job("tool")];
+    let mut dashboard = started(&jobs);
+    output(&mut dashboard, "tool", &"\n".repeat(16 * 1024));
+    let records = dashboard.pane("tool").unwrap().records();
+    assert_eq!(records.len(), 10_000);
+    assert!(records.iter().all(|record| record.text.is_empty()));
+    output(&mut dashboard, "tool", "AFTER\n");
+    assert_eq!(dashboard.pane("tool").unwrap().records().back().unwrap().text, "AFTER");
+}
+
+#[test]
+fn oversized_empty_line_event_counts_newlines_toward_text_budget() {
+    let jobs = [job("tool")];
+    let mut dashboard = started(&jobs);
+    output(&mut dashboard, "tool", &format!("{}\nLAST\n", "\n".repeat(100_000)));
+    let records = dashboard.pane("tool").unwrap().records();
+    assert_eq!(records.len(), 10_000);
+    assert!(records.back().unwrap().text.contains("event truncated"));
+    assert!(records.iter().all(|record| !record.text.contains("LAST")));
+}
+
+#[test]
+fn partial_line_cap_does_not_drop_following_lines_in_same_pipe_chunk() {
+    let jobs = [job("tool")];
+    let mut dashboard = started(&jobs);
+    output(&mut dashboard, "tool", &"x".repeat(16_000));
+    output(
+        &mut dashboard,
+        "tool",
+        &format!("{}\n\x1b[32mNEXT\n", "é".repeat(1_000)),
+    );
+    let records = dashboard.pane("tool").unwrap().records();
+    assert_eq!(records.len(), 2);
+    assert!(records[0].text.contains("event truncated"));
+    assert!(records[0].text.len() <= 16 * 1024);
+    assert_eq!(records[1].text, "NEXT");
+    assert_eq!(text_cell(&rendered(&mut dashboard, &jobs), "NEXT").fg, Color::Green);
+}
+
+#[test]
+fn full_pipe_read_with_utf8_carry_keeps_every_complete_line() {
+    let jobs = [job("tool")];
+    for carry in 0..=3 {
+        let mut dashboard = started(&jobs);
+        output(&mut dashboard, "tool", "OLD\r");
+        let mut payload = "🚀\n".to_owned();
+        let remaining = 16 * 1024 + carry - payload.len();
+        payload.push_str(&"x\n".repeat(remaining / 2));
+        if !remaining.is_multiple_of(2) {
+            payload.push('z');
+        }
+
+        output(&mut dashboard, "tool", &payload);
+        let actual: Vec<&str> = dashboard
+            .pane("tool")
+            .unwrap()
+            .records()
+            .iter()
+            .map(|record| record.text.as_str())
+            .collect();
+        let expected: Vec<&str> = payload.split_terminator('\n').collect();
+        assert_eq!(actual.len(), expected.len(), "UTF-8 carry: {carry}");
+        assert_eq!(actual, expected, "UTF-8 carry: {carry}");
     }
 }

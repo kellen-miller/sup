@@ -1026,3 +1026,169 @@ fn a_new_terminal_session_cannot_reuse_another_terminals_fixture_ticket() {
     fixture.assert_no_secret(&first.output);
     fixture.assert_no_secret(&second.output);
 }
+
+fn color_fixture() -> Fixture {
+    let fixture = Fixture::new();
+    executable(
+        &fixture.bin.join("colors"),
+        r#"#!/bin/sh
+printf '%s\n' "${HOMEBREW_COLOR-unset}" "${FORCE_COLOR-unset}" "${CLICOLOR_FORCE-unset}" "${CARGO_TERM_COLOR-unset}" > "$FIXTURE_ROOT/color-env"
+if [ ! -t 0 ] && [ ! -t 1 ] && [ ! -t 2 ]; then
+    : > "$FIXTURE_ROOT/child-pipes"
+fi
+if [ "${HOMEBREW_COLOR-}" = 1 ] && [ "${FORCE_COLOR-}" = 1 ] && [ "${CLICOLOR_FORCE-}" = 1 ] && [ "${CARGO_TERM_COLOR-}" = always ]; then
+    printf '\033[31mCOMMAND-COLOR\033[0m\n'
+else
+    printf 'COMMAND-PLAIN\n'
+fi
+/bin/sleep 0.2
+"#,
+    );
+    fixture.jobs(&job("colors", "none", "['colors']"));
+    fixture
+}
+
+struct ColorPolicyCase {
+    plain: bool,
+    environment: &'static [(&'static str, &'static str)],
+    expected: &'static str,
+    colored: bool,
+}
+
+const COLOR_POLICY_CASES: [ColorPolicyCase; 7] = [
+    ColorPolicyCase {
+        plain: false,
+        environment: &[],
+        expected: "1\n1\n1\nalways\n",
+        colored: true,
+    },
+    ColorPolicyCase {
+        plain: true,
+        environment: &[],
+        expected: "unset\nunset\nunset\nunset\n",
+        colored: false,
+    },
+    ColorPolicyCase {
+        plain: true,
+        environment: &[
+            ("HOMEBREW_COLOR", "1"),
+            ("FORCE_COLOR", "1"),
+            ("CLICOLOR_FORCE", "1"),
+            ("CARGO_TERM_COLOR", "always"),
+        ],
+        expected: "1\n1\n1\nalways\n",
+        colored: true,
+    },
+    ColorPolicyCase {
+        plain: false,
+        environment: &[("NO_COLOR", "")],
+        expected: "1\n1\n1\nalways\n",
+        colored: true,
+    },
+    ColorPolicyCase {
+        plain: false,
+        environment: &[("NO_COLOR", "1")],
+        expected: "unset\nunset\nunset\nunset\n",
+        colored: false,
+    },
+    ColorPolicyCase {
+        plain: false,
+        environment: &[
+            ("HOMEBREW_COLOR", "0"),
+            ("FORCE_COLOR", "0"),
+            ("CLICOLOR_FORCE", "0"),
+            ("CARGO_TERM_COLOR", "never"),
+        ],
+        expected: "0\n0\n0\nnever\n",
+        colored: false,
+    },
+    ColorPolicyCase {
+        plain: false,
+        environment: &[("HOMEBREW_NO_COLOR", "1")],
+        expected: "unset\n1\n1\nalways\n",
+        colored: false,
+    },
+];
+
+#[test]
+fn interactive_child_colors_preserve_explicit_settings_and_no_color() {
+    for case in COLOR_POLICY_CASES {
+        let fixture = color_fixture();
+        let mut command = fixture.ui_command();
+        command.envs(case.environment.iter().copied());
+        if case.plain {
+            command.arg("--no-tui");
+        }
+
+        let mut run = PtyRun::spawn(command);
+        assert!(run.finish(&[], Duration::from_secs(5)).success());
+        assert_eq!(
+            fs::read_to_string(fixture.root().join("color-env")).unwrap(),
+            case.expected
+        );
+        assert!(fixture.root().join("child-pipes").exists());
+        let directory = fs::read_dir(fixture.home.join(".cache/sup/runs"))
+            .unwrap()
+            .next()
+            .unwrap()
+            .unwrap()
+            .path();
+        let log = fs::read_to_string(directory.join("colors.log")).unwrap();
+        assert_eq!(
+            log,
+            if case.colored {
+                "\x1b[31mCOMMAND-COLOR\x1b[0m\n"
+            } else {
+                "COMMAND-PLAIN\n"
+            }
+        );
+        assert_eq!(
+            String::from_utf8_lossy(&run.output).contains("\x1b[?1049h"),
+            !case.plain
+        );
+        if case.plain {
+            assert!(!run.output.contains(&0x1b));
+        }
+    }
+}
+
+#[test]
+fn redirected_output_or_noninteractive_input_does_not_request_child_colors() {
+    for redirect_stdout in [false, true] {
+        let fixture = color_fixture();
+        let original = fixture.ui_command();
+        let mut command = Command::new("/bin/sh");
+        command
+            .args([
+                "-c",
+                if redirect_stdout {
+                    "exec \"$@\" > \"$FIXTURE_ROOT/redirected\""
+                } else {
+                    "exec \"$@\" < /dev/null"
+                },
+                "color-wrapper",
+            ])
+            .arg(original.get_program())
+            .args(original.get_args())
+            .env_clear()
+            .envs(
+                original
+                    .get_envs()
+                    .filter_map(|(key, value)| value.map(|value| (key, value))),
+            )
+            .current_dir(&fixture.home);
+        let mut run = PtyRun::spawn(command);
+        assert!(run.finish(&[], Duration::from_secs(5)).success());
+        assert_eq!(
+            fs::read_to_string(fixture.root().join("color-env")).unwrap(),
+            "unset\nunset\nunset\nunset\n"
+        );
+        assert!(fixture.root().join("child-pipes").exists());
+        assert!(!run.output.contains(&0x1b));
+        if redirect_stdout {
+            let output = fs::read(fixture.root().join("redirected")).unwrap();
+            assert!(!output.contains(&0x1b));
+            assert!(String::from_utf8_lossy(&output).contains("COMMAND-PLAIN"));
+        }
+    }
+}

@@ -29,6 +29,8 @@ Running `sup` or `sup run` executes the selected jobs. `sup list` prints job nam
 
 The dashboard shows one labeled output pane per running job below the status area. Every finished pane closes, including failures, and remaining panes expand. Crowded terminals use pages: `[` and `]` change pages; Tab and Shift-Tab select a pane on the current page. Up/Down, Page Up/Page Down, and the mouse wheel scroll the selected pane; End resumes following its output. Each pane keeps its own scroll position. Resize the terminal to change the grid. Password prompts take precedence over navigation.
 
+Live panes preserve command colors and text styles. In interactive dashboard mode, SUP requests color from piped child commands through missing `HOMEBREW_COLOR`, `FORCE_COLOR`, `CLICOLOR_FORCE`, and `CARGO_TERM_COLOR` settings. Existing values and `NO_COLOR` are respected; `HOMEBREW_NO_COLOR` prevents the Homebrew request. Plain mode and redirected or noninteractive runs add no color settings. Terminal control actions are discarded from the display; disk logs keep the original output.
+
 ## Configuration
 
 By default, `sup` reads `$XDG_CONFIG_HOME/sup/config.toml`, or `$HOME/.config/sup/config.toml` when `XDG_CONFIG_HOME` is unset. It never searches the current directory. If the default file is absent, embedded defaults from the shipped `config.toml` are used and shown by `sup plan`. An explicit missing `--config` path is an error.

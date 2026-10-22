@@ -27,6 +27,7 @@ fn options(home: PathBuf) -> RunOptions {
         home,
         retention_days: 30,
         cleanup_logs: true,
+        request_color: false,
     }
 }
 

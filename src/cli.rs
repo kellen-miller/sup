@@ -1,7 +1,7 @@
 use clap::{Args, Parser, Subcommand};
 use std::collections::HashMap;
 use std::fs::{self, OpenOptions};
-use std::io::Write;
+use std::io::{IsTerminal, Write};
 use std::path::PathBuf;
 
 use crate::config::{self, AuthMode};
@@ -194,6 +194,7 @@ fn dispatch(
                 home,
                 retention_days: settings.retention_days.unwrap_or(loaded.retention_days),
                 cleanup_logs: loaded.cleanup_logs && !settings.no_log_cleanup,
+                request_color: !settings.no_tui && std::io::stdout().is_terminal() && std::io::stdin().is_terminal(),
             };
             let (events_tx, events_rx) = std::sync::mpsc::sync_channel(128);
             let (auth_tx, auth_rx) = std::sync::mpsc::sync_channel(8);
