@@ -1,6 +1,6 @@
 use crate::auth::{AuthRequest, Password, PasswordReply, PlainPrompt};
 use crate::config::Job;
-use crate::runner::{Cancellation, JobResult, RunEvent};
+use crate::runner::{Cancellation, JobResult, JobStatus, RunEvent};
 use crossterm::event::{self, Event, KeyCode, KeyModifiers, MouseEventKind};
 use crossterm::execute;
 use ratatui::Terminal;
@@ -21,124 +21,84 @@ const EVENT_BYTES: usize = 16 * 1024;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct OutputRecord {
-    pub job: String,
     pub text: String,
+    age: u64,
 }
 
 #[derive(Clone, Debug)]
-pub struct Dashboard {
+pub struct JobPane {
     records: VecDeque<OutputRecord>,
     bytes: usize,
-    pending: HashMap<String, usize>,
-    filters: HashMap<String, OutputFilter>,
+    pending: Option<usize>,
+    filter: OutputFilter,
     anchor: Option<usize>,
     following: bool,
+    height: usize,
 }
 
-impl Dashboard {
-    pub fn push(&mut self, job: &str, text: &str) {
-        if text.is_empty() {
-            return;
+impl Default for JobPane {
+    fn default() -> Self {
+        Self {
+            records: VecDeque::new(),
+            bytes: 0,
+            pending: None,
+            filter: OutputFilter::default(),
+            anchor: None,
+            following: true,
+            height: 1,
         }
-        let text = self.filters.entry(job.to_owned()).or_default().clean(text);
+    }
+}
+
+impl JobPane {
+    fn push(&mut self, text: &str, age: &mut u64) {
+        let text = self.filter.clean(text);
         if text.is_empty() {
             return;
         }
 
-        let pending_index = self.pending.remove(job);
-        let mut combined = pending_index
+        let pending = self.pending.take();
+        let mut combined = pending
             .and_then(|index| self.records.get(index))
             .map(|record| record.text.clone())
             .unwrap_or_default();
         combined.push_str(&text);
         let safe = truncate_event(normalize_lines(&combined));
-        let mut lines: Vec<&str> = safe.split_terminator('\n').collect();
-        let ends_line = safe.ends_with('\n');
-        let mut unfinished = None;
-        if !safe.ends_with('\n')
-            && let Some(line) = lines.pop()
-        {
-            unfinished = Some(line);
-        }
-
-        if let Some(index) = pending_index
-            && let Some(record) = self.records.get_mut(index)
-        {
-            if let Some(line) = lines.first() {
-                self.bytes = self.bytes.saturating_sub(record.text.len());
-                record.text = (*line).to_owned();
-                self.bytes += record.text.len();
-                lines.remove(0);
-            } else if ends_line {
-                self.bytes = self.bytes.saturating_sub(record.text.len());
-                record.text.clear();
-            } else if let Some(line) = unfinished.take() {
+        let mut lines = safe.split_terminator('\n').peekable();
+        if let Some(index) = pending {
+            if let Some(line) = lines.next() {
+                let record = &mut self.records[index];
                 self.bytes = self.bytes.saturating_sub(record.text.len());
                 record.text = line.to_owned();
                 self.bytes += record.text.len();
-                self.pending.insert(job.to_owned(), index);
-                self.trim_history();
-                return;
-            }
-            self.trim_history();
-        }
-        self.push_lines(job, lines);
-        if let Some(line) = unfinished {
-            let index = self.append_record(job, line);
-            self.pending.insert(job.to_owned(), index);
-        }
-    }
-
-    pub fn finish_job(&mut self, job: &str) {
-        self.pending.remove(job);
-        self.filters.remove(job);
-    }
-
-    fn push_lines(&mut self, job: &str, lines: Vec<&str>) {
-        for text in lines {
-            self.append_record(job, text);
-        }
-    }
-
-    fn append_record(&mut self, job: &str, text: &str) -> usize {
-        self.bytes += text.len() + job.len();
-        self.records.push_back(OutputRecord {
-            job: job.to_owned(),
-            text: text.to_owned(),
-        });
-        self.trim_history();
-        self.records.len().saturating_sub(1)
-    }
-
-    fn trim_history(&mut self) {
-        while self.records.len() > HISTORY_EVENTS || self.bytes > HISTORY_BYTES {
-            if let Some(record) = self.records.pop_front() {
-                self.bytes = self.bytes.saturating_sub(record.text.len() + record.job.len());
-                self.pending.retain(|_, index| *index > 0);
-                for index in self.pending.values_mut() {
-                    *index -= 1;
-                }
-                if let Some(anchor) = self.anchor.as_mut() {
-                    *anchor = anchor.saturating_sub(1);
+                if lines.peek().is_none() && !safe.ends_with('\n') {
+                    self.pending = Some(index);
                 }
             } else {
-                break;
+                self.bytes = self.bytes.saturating_sub(self.records[index].text.len());
+                self.records[index].text.clear();
+            }
+        }
+
+        while let Some(line) = lines.next() {
+            self.bytes += line.len();
+            self.records.push_back(OutputRecord {
+                text: line.to_owned(),
+                age: *age,
+            });
+            *age = age.saturating_add(1);
+            if lines.peek().is_none() && !safe.ends_with('\n') {
+                self.pending = Some(self.records.len() - 1);
             }
         }
     }
 
-    pub fn scroll(&mut self, delta: isize) {
-        if self.records.is_empty() {
-            return;
+    fn evict_oldest(&mut self) {
+        if let Some(record) = self.records.pop_front() {
+            self.bytes = self.bytes.saturating_sub(record.text.len());
+            self.pending = self.pending.and_then(|index| index.checked_sub(1));
+            self.anchor = self.anchor.map(|index| index.saturating_sub(1));
         }
-        let current = self.anchor.unwrap_or(self.records.len().saturating_sub(1)) as isize;
-        self.anchor = Some((current + delta).clamp(0, self.records.len() as isize - 1) as usize);
-        self.following = false;
-    }
-
-    pub fn resume(&mut self) {
-        self.following = true;
-        self.anchor = None;
     }
 
     pub fn records(&self) -> &VecDeque<OutputRecord> {
@@ -150,16 +110,169 @@ impl Dashboard {
     }
 }
 
-impl Default for Dashboard {
-    fn default() -> Self {
+#[derive(Clone, Debug)]
+pub struct Dashboard {
+    panes: HashMap<String, JobPane>,
+    statuses: HashMap<String, String>,
+    order: Vec<String>,
+    focus: Option<String>,
+    visible: Vec<String>,
+    page: usize,
+    capacity: usize,
+    bytes: usize,
+    records: usize,
+    next_age: u64,
+}
+
+impl Dashboard {
+    pub fn new(jobs: &[Job]) -> Self {
         Self {
-            records: VecDeque::new(),
+            panes: HashMap::new(),
+            statuses: HashMap::new(),
+            order: jobs.iter().map(|job| job.name.clone()).collect(),
+            focus: None,
+            visible: Vec::new(),
+            page: 0,
+            capacity: 0,
             bytes: 0,
-            pending: HashMap::new(),
-            filters: HashMap::new(),
-            anchor: None,
-            following: true,
+            records: 0,
+            next_age: 0,
         }
+    }
+
+    pub fn apply_event(&mut self, event: RunEvent) {
+        match event {
+            RunEvent::Started(name) => {
+                self.panes.entry(name.clone()).or_default();
+                self.statuses.insert(name.clone(), "running".to_owned());
+                if self.focus.is_none() {
+                    self.focus = Some(name);
+                }
+            }
+            RunEvent::Output { job, text } => {
+                if let Some(pane) = self.panes.get_mut(&job) {
+                    self.bytes = self.bytes.saturating_sub(pane.bytes);
+                    self.records = self.records.saturating_sub(pane.records.len());
+                    pane.push(&text, &mut self.next_age);
+                    self.bytes += pane.bytes;
+                    self.records += pane.records.len();
+                    self.trim_history();
+                }
+            }
+            RunEvent::Finished(result) => {
+                let name = &result.job.name;
+                if let Some(pane) = self.panes.remove(name) {
+                    self.bytes = self.bytes.saturating_sub(pane.bytes);
+                    self.records = self.records.saturating_sub(pane.records.len());
+                }
+
+                self.visible.retain(|job| job != name);
+                self.statuses
+                    .insert(name.clone(), format!("{:?}", result.status).to_lowercase());
+                if self.focus.as_ref() == Some(name) {
+                    let index = self.order.iter().position(|job| job == name).unwrap_or(0);
+                    self.focus = self.order[index..]
+                        .iter()
+                        .find(|job| self.panes.contains_key(*job))
+                        .or_else(|| {
+                            self.order[..index]
+                                .iter()
+                                .rev()
+                                .find(|job| self.panes.contains_key(*job))
+                        })
+                        .cloned();
+                }
+            }
+            RunEvent::RunDirectory(_) => {}
+        }
+    }
+
+    fn trim_history(&mut self) {
+        while self.records > HISTORY_EVENTS || self.bytes > HISTORY_BYTES {
+            let oldest = self
+                .panes
+                .iter()
+                .filter_map(|(name, pane)| pane.records.front().map(|record| (name.clone(), record.age)))
+                .min_by_key(|(_, age)| *age);
+            let Some((name, _)) = oldest else { break };
+            if let Some(pane) = self.panes.get_mut(&name) {
+                self.bytes = self.bytes.saturating_sub(pane.bytes);
+                pane.evict_oldest();
+                self.bytes += pane.bytes;
+                self.records -= 1;
+            }
+        }
+    }
+
+    pub fn pane(&self, name: &str) -> Option<&JobPane> {
+        self.panes.get(name)
+    }
+
+    pub fn focused_job(&self) -> Option<&str> {
+        self.focus.as_deref()
+    }
+
+    pub fn scroll(&mut self, delta: isize) {
+        if let Some(pane) = self.focus.as_ref().and_then(|name| self.panes.get_mut(name)) {
+            if pane.records.is_empty() {
+                return;
+            }
+
+            let current = pane.anchor.unwrap_or(pane.records.len() - 1) as isize;
+            pane.anchor = Some((current + delta).clamp(0, pane.records.len() as isize - 1) as usize);
+            pane.following = false;
+        }
+    }
+
+    pub fn resume(&mut self) {
+        if let Some(pane) = self.focus.as_ref().and_then(|name| self.panes.get_mut(name)) {
+            pane.following = true;
+            pane.anchor = None;
+        }
+    }
+
+    pub fn change_page(&mut self, delta: isize) {
+        let active: Vec<&String> = self
+            .order
+            .iter()
+            .filter(|name| self.panes.contains_key(*name))
+            .collect();
+        let capacity = self.capacity.max(1);
+        let last = active.len().saturating_sub(1) / capacity;
+        let page = (self.page as isize + delta).clamp(0, last as isize) as usize;
+        if page == self.page {
+            return;
+        }
+
+        self.page = page;
+        self.focus = active.get(self.page * capacity).map(|name| (*name).clone());
+        self.visible = active
+            .into_iter()
+            .skip(self.page * capacity)
+            .take(capacity)
+            .cloned()
+            .collect();
+    }
+
+    pub fn cycle_focus(&mut self, backwards: bool) {
+        if self.visible.is_empty() {
+            return;
+        }
+
+        let index = self
+            .visible
+            .iter()
+            .position(|name| Some(name) == self.focus.as_ref())
+            .unwrap_or(0);
+        let step = if backwards { self.visible.len() - 1 } else { 1 };
+        self.focus = Some(self.visible[(index + step) % self.visible.len()].clone());
+    }
+
+    fn page_height(&self) -> isize {
+        self.focus
+            .as_ref()
+            .and_then(|name| self.panes.get(name))
+            .map_or(1, |pane| pane.height.max(1)) as isize
     }
 }
 
@@ -266,44 +379,46 @@ fn truncate_event(mut text: String) -> String {
     if text.len() <= EVENT_BYTES {
         return text;
     }
-    let marker = " … [event truncated]";
+
+    let marker = if text.ends_with('\n') {
+        " … [event truncated]\n"
+    } else {
+        " … [event truncated]"
+    };
     let mut end = EVENT_BYTES - marker.len();
     while !text.is_char_boundary(end) {
         end -= 1;
     }
+
     text.truncate(end);
     text.push_str(marker);
     text
 }
 
-pub fn render(frame: &mut ratatui::Frame<'_>, dashboard: &Dashboard, jobs: &[Job], statuses: &HashMap<String, String>) {
+pub fn render(frame: &mut ratatui::Frame<'_>, dashboard: &mut Dashboard, jobs: &[Job]) {
     let area = frame.area();
     if area.width == 0 || area.height == 0 {
         return;
     }
+
     frame.render_widget(
         Block::default().style(Style::default().fg(tokyo_fg()).bg(tokyo_bg())),
         area,
     );
     let vertical = Layout::default()
         .direction(Direction::Vertical)
-        .constraints([Constraint::Length(1), Constraint::Min(3), Constraint::Length(1)])
+        .constraints([Constraint::Length(1), Constraint::Min(0), Constraint::Length(1)])
         .split(area);
-    render_title(frame, vertical[0], dashboard, jobs, statuses);
-    let height = vertical[1].height;
-    let job_count = if height >= 12 {
-        jobs.len().min(6).min(height.saturating_sub(11) as usize)
-    } else {
-        0
-    };
+    render_title(frame, vertical[0], dashboard, jobs, &dashboard.statuses);
+    let job_count = jobs.len().min(6).min(vertical[1].height.saturating_sub(11) as usize);
     let job_rows = if job_count > 0 { job_count as u16 + 3 } else { 0 };
     let middle = Layout::default()
         .direction(Direction::Vertical)
-        .constraints([Constraint::Length(job_rows), Constraint::Min(1)])
+        .constraints([Constraint::Length(job_rows), Constraint::Min(0)])
         .split(vertical[1]);
-    render_jobs(frame, middle[0], jobs, statuses, job_count);
-    render_output(frame, middle[1], dashboard, jobs.len().saturating_sub(job_count));
-    render_hint(frame, vertical[2], dashboard.following);
+    render_jobs(frame, middle[0], jobs, &dashboard.statuses, job_count);
+    render_panes(frame, middle[1], dashboard, jobs);
+    render_hint(frame, vertical[2], dashboard);
 }
 
 fn render_title(
@@ -327,7 +442,7 @@ fn render_title(
                 jobs.len(),
                 statuses.values().filter(|status| status.as_str() == "running").count(),
                 statuses.values().filter(|status| status.as_str() == "failed").count(),
-                dashboard.records.len()
+                dashboard.records
             ),
             Style::default().fg(tokyo_blue()),
         ),
@@ -380,57 +495,101 @@ fn render_jobs(
     frame.render_widget(table, area);
 }
 
-fn render_output(frame: &mut ratatui::Frame<'_>, area: Rect, dashboard: &Dashboard, hidden: usize) {
-    let hidden_text = if hidden > 0 {
-        format!("  {hidden} jobs hidden")
+fn render_panes(frame: &mut ratatui::Frame<'_>, area: Rect, dashboard: &mut Dashboard, jobs: &[Job]) {
+    let active: Vec<&Job> = jobs
+        .iter()
+        .filter(|job| dashboard.panes.contains_key(&job.name))
+        .collect();
+    let (max_columns, max_rows) = if area.width < 36 || area.height < 8 {
+        (1, 1)
     } else {
-        String::new()
+        ((area.width / 36) as usize, (area.height / 8) as usize)
     };
-    let heading = format!(" Output{hidden_text} ");
-    let output = Block::default()
-        .title(heading)
-        .borders(Borders::ALL)
-        .border_style(Style::default().fg(tokyo_panel()));
-    let inner = output.inner(area);
-    frame.render_widget(output, area);
-    if inner.width > 0 && inner.height > 0 {
-        let visible = inner.height as usize;
-        let last = dashboard
-            .anchor
-            .unwrap_or_else(|| dashboard.records.len().saturating_sub(1));
-        let start = last.saturating_add(1).saturating_sub(visible);
-        let mut lines: Vec<Line<'_>> = dashboard
-            .records
-            .iter()
-            .skip(start)
-            .take(last.saturating_sub(start) + 1)
-            .map(|record| {
-                let text = ratatui::text::Text::from(record.text.as_str())
-                    .lines
-                    .into_iter()
-                    .map(|line| line.to_string())
-                    .collect::<Vec<_>>()
-                    .join(" ⏎ ");
-                Line::from(vec![
-                    Span::styled(format!("{} › ", record.job), Style::default().fg(tokyo_purple())),
-                    Span::raw(text),
-                ])
-            })
-            .collect();
-        let padding = visible.saturating_sub(lines.len());
-        let mut padded = vec![Line::default(); padding];
-        padded.append(&mut lines);
-        let paragraph = Paragraph::new(padded).alignment(Alignment::Left);
-        frame.render_widget(paragraph, inner);
+    dashboard.capacity = max_columns * max_rows;
+    if active.is_empty() {
+        dashboard.focus = None;
+        dashboard.visible.clear();
+        dashboard.page = 0;
+        frame.render_widget(
+            Paragraph::new(" Waiting for jobs · finished panes close automatically "),
+            area,
+        );
+        return;
+    }
+
+    let focus_index = active
+        .iter()
+        .position(|job| Some(&job.name) == dashboard.focus.as_ref());
+    let focus_index = focus_index.unwrap_or_else(|| (dashboard.page * dashboard.capacity).min(active.len() - 1));
+    dashboard.focus = Some(active[focus_index].name.clone());
+    dashboard.page = focus_index / dashboard.capacity;
+    let visible: Vec<&Job> = active
+        .into_iter()
+        .skip(dashboard.page * dashboard.capacity)
+        .take(dashboard.capacity)
+        .collect();
+    dashboard.visible = visible.iter().map(|job| job.name.clone()).collect();
+    let columns = max_columns.min(visible.len());
+    let rows = visible.len().div_ceil(columns);
+    let row_areas = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints(vec![Constraint::Fill(1); rows])
+        .split(area);
+    for (row, row_jobs) in visible.chunks(columns).enumerate() {
+        let cells = Layout::default()
+            .direction(Direction::Horizontal)
+            .constraints(vec![Constraint::Fill(1); row_jobs.len()])
+            .split(row_areas[row]);
+        for (column, job) in row_jobs.iter().enumerate() {
+            if let Some(pane) = dashboard.panes.get_mut(&job.name) {
+                render_pane(
+                    frame,
+                    cells[column],
+                    pane,
+                    job,
+                    dashboard.focus.as_ref() == Some(&job.name),
+                );
+            }
+        }
     }
 }
 
-fn render_hint(frame: &mut ratatui::Frame<'_>, area: Rect, following: bool) {
-    let hint = if following {
-        " ↑↓/PgUp PgDn/wheel scroll   End follow   Ctrl-C cancel "
-    } else {
-        " [PAUSED] ↑↓/PgUp PgDn/wheel scroll   End follow   Ctrl-C cancel "
-    };
+fn render_pane(frame: &mut ratatui::Frame<'_>, area: Rect, pane: &mut JobPane, job: &Job, focused: bool) {
+    let state = if pane.following { "live" } else { "paused" };
+    let marker = if focused { "* " } else { "" };
+    let block = Block::default()
+        .title(format!(" {marker}{} ({}) · {state} ", job.label, job.name))
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(if focused { tokyo_cyan() } else { tokyo_panel() }));
+    let inner = block.inner(area);
+    pane.height = inner.height as usize;
+    frame.render_widget(block, area);
+    if inner.width == 0 || inner.height == 0 {
+        return;
+    }
+
+    let last = pane.anchor.unwrap_or_else(|| pane.records.len().saturating_sub(1));
+    let start = last.saturating_add(1).saturating_sub(pane.height);
+    let lines: Vec<Line<'_>> = pane
+        .records
+        .iter()
+        .skip(start)
+        .take(last.saturating_sub(start) + 1)
+        .map(|record| Line::raw(record.text.as_str()))
+        .collect();
+    let mut padded = vec![Line::default(); pane.height.saturating_sub(lines.len())];
+    padded.extend(lines);
+    frame.render_widget(Paragraph::new(padded).alignment(Alignment::Left), inner);
+}
+
+fn render_hint(frame: &mut ratatui::Frame<'_>, area: Rect, dashboard: &Dashboard) {
+    let pages = dashboard.panes.len().div_ceil(dashboard.capacity.max(1)).max(1);
+    let hidden = dashboard.panes.len().saturating_sub(dashboard.visible.len());
+    let hint = format!(
+        " {}/{} · {hidden} hidden  [] pages  Tab focus  ↑↓/Pg scroll  End follow  ^C cancel ",
+        dashboard.page + 1,
+        pages
+    );
     frame.render_widget(Paragraph::new(hint).style(Style::default().fg(tokyo_muted())), area);
 }
 
@@ -450,14 +609,13 @@ pub fn run(
         return plain_run(event_rx, auth_rx, cancellation);
     }
     let mut terminal = TerminalGuard::enter()?;
-    let mut dashboard = Dashboard::default();
-    let mut states = HashMap::new();
+    let mut dashboard = Dashboard::new(jobs);
     let mut log_dir = None;
     let mut password: Option<(AuthRequest, Password)> = None;
     let mut disconnected = false;
     let mut last_draw = Instant::now();
     loop {
-        disconnected |= collect_run_events(&event_rx, &mut dashboard, &mut states, &mut log_dir);
+        disconnected |= collect_run_events(&event_rx, &mut dashboard, &mut log_dir);
         if password.is_none()
             && let Ok(request) = auth_rx.try_recv()
             && request.is_active()
@@ -482,7 +640,7 @@ pub fn run(
             terminal
                 .terminal
                 .draw(|frame| {
-                    render(frame, &dashboard, jobs, &states);
+                    render(frame, &mut dashboard, jobs);
                     if let Some((job, text, length)) = &prompt {
                         render_password(frame, job, text, *length);
                     }
@@ -510,7 +668,7 @@ pub fn run(
     }
     terminal
         .terminal
-        .draw(|frame| render(frame, &dashboard, jobs, &states))
+        .draw(|frame| render(frame, &mut dashboard, jobs))
         .map_err(|error| error.to_string())?;
     drop(terminal);
     if let Some(request) = password.take() {
@@ -522,7 +680,6 @@ pub fn run(
 fn collect_run_events(
     event_rx: &Receiver<RunEvent>,
     dashboard: &mut Dashboard,
-    states: &mut HashMap<String, String>,
     log_dir: &mut Option<std::path::PathBuf>,
 ) -> bool {
     for _ in 0..256 {
@@ -531,16 +688,10 @@ fn collect_run_events(
             Err(std::sync::mpsc::TryRecvError::Disconnected) => return true,
             Err(std::sync::mpsc::TryRecvError::Empty) => return false,
         };
-        match event {
-            RunEvent::RunDirectory(path) => *log_dir = Some(path),
-            RunEvent::Started(name) => {
-                states.insert(name, "running".to_owned());
-            }
-            RunEvent::Output { job, text } => dashboard.push(&job, &text),
-            RunEvent::Finished(result) => {
-                dashboard.finish_job(&result.job.name);
-                states.insert(result.job.name.clone(), format!("{:?}", result.status).to_lowercase());
-            }
+        if let RunEvent::RunDirectory(path) = event {
+            *log_dir = Some(path);
+        } else {
+            dashboard.apply_event(event);
         }
     }
     false
@@ -557,12 +708,12 @@ fn handle_terminal_event(
             Some((request, secret)) => handle_password_key(key, request, secret, password, cancellation)?,
             None => handle_dashboard_key(key, dashboard, cancellation),
         },
-        Event::Mouse(mouse) => match mouse.kind {
+        Event::Mouse(mouse) if password.is_none() => match mouse.kind {
             MouseEventKind::ScrollUp => dashboard.scroll(-3),
             MouseEventKind::ScrollDown => dashboard.scroll(3),
             _ => {}
         },
-        Event::Resize(_, _) | Event::FocusGained | Event::FocusLost | Event::Paste(_) => {}
+        Event::Mouse(_) | Event::Resize(_, _) | Event::FocusGained | Event::FocusLost | Event::Paste(_) => {}
     }
     Ok(())
 }
@@ -607,17 +758,15 @@ fn handle_dashboard_key(key: crossterm::event::KeyEvent, dashboard: &mut Dashboa
         KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => cancellation.cancel(),
         KeyCode::Up => dashboard.scroll(-1),
         KeyCode::Down => dashboard.scroll(1),
-        KeyCode::PageUp => dashboard.scroll(-page_height()),
-        KeyCode::PageDown => dashboard.scroll(page_height()),
+        KeyCode::PageUp => dashboard.scroll(-dashboard.page_height()),
+        KeyCode::PageDown => dashboard.scroll(dashboard.page_height()),
         KeyCode::End => dashboard.resume(),
+        KeyCode::Tab => dashboard.cycle_focus(false),
+        KeyCode::BackTab => dashboard.cycle_focus(true),
+        KeyCode::Char('[') => dashboard.change_page(-1),
+        KeyCode::Char(']') => dashboard.change_page(1),
         _ => {}
     }
-}
-
-fn page_height() -> isize {
-    crossterm::terminal::size()
-        .map(|(_, height)| height.saturating_sub(13).max(6) as isize)
-        .unwrap_or(8)
 }
 
 fn plain_run(
@@ -662,16 +811,38 @@ pub fn print_summary(results: &[JobResult], log_dir: Option<&std::path::Path>, t
             result.status,
             result.elapsed.as_secs_f64()
         );
-        if !result.reason.is_empty() {
-            eprintln!("{}: {}", result.job.name, result.reason);
-        }
-        if let Some(path) = &result.log_path {
-            println!("  log: {}", path.display());
-            if result.exit_code.is_some_and(|code| code != 0) {
-                print_log_tail(path, tail_lines);
+        if result.status != JobStatus::Failed {
+            if !result.reason.is_empty() {
+                println!("  {}", result.reason);
+            }
+
+            if let Some(path) = &result.log_path {
+                println!("  log: {}", path.display());
             }
         }
     }
+
+    if results.iter().any(|result| result.status == JobStatus::Failed) {
+        eprintln!("Failure report:");
+        for result in results.iter().filter(|result| result.status == JobStatus::Failed) {
+            eprintln!("{} ({})", result.job.label, result.job.name);
+            if let Some(code) = result.exit_code {
+                eprintln!("  exit code: {code}");
+            }
+
+            if !result.reason.is_empty() {
+                eprintln!("  reason: {}", result.reason);
+            }
+
+            if let Some(path) = &result.log_path {
+                eprintln!("  log: {}", path.display());
+                if tail_lines > 0 {
+                    print_log_tail(path, tail_lines);
+                }
+            }
+        }
+    }
+
     if let Some(path) = log_dir {
         println!("Run logs: {}", path.display());
     }
@@ -691,11 +862,11 @@ fn print_log_tail(path: &std::path::Path, tail_lines: usize) {
         return;
     }
     let mut bytes = Vec::new();
-    if let Err(error) = file.read_to_end(&mut bytes) {
+    if let Err(error) = file.take(64 * 1024).read_to_end(&mut bytes) {
         eprintln!("  cannot read log {}: {error}", path.display());
         return;
     }
-    let tail = String::from_utf8_lossy(&bytes);
+    let tail = normalize_lines(&OutputFilter::default().clean(&String::from_utf8_lossy(&bytes)));
     for line in tail
         .lines()
         .rev()
@@ -847,4 +1018,99 @@ fn restore_screen(output: &mut impl Write) -> io::Result<()> {
         first_error = Some(error);
     }
     first_error.map_or(Ok(()), Err)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::print_summary;
+    use crate::config::{AuthMode, Job};
+    use crate::runner::{JobResult, JobStatus};
+    use std::path::Path;
+    use std::process::Command;
+    use std::time::Duration;
+
+    fn report_results(directory: &Path) -> Vec<JobResult> {
+        [
+            ("missing", JobStatus::Failed, None, None),
+            ("zero", JobStatus::Failed, Some(0), Some(directory.join("output.log"))),
+            (
+                "unreadable",
+                JobStatus::Failed,
+                None,
+                Some(directory.join("absent.log")),
+            ),
+            ("after", JobStatus::Failed, Some(4), Some(directory.join("output.log"))),
+            ("skip", JobStatus::Skipped, None, None),
+            ("cancel", JobStatus::Cancelled, None, None),
+        ]
+        .into_iter()
+        .map(|(name, status, exit_code, log_path)| JobResult {
+            job: Job {
+                name: name.to_owned(),
+                label: format!("Label {name}"),
+                phase: "core".to_owned(),
+                command: vec!["/bin/true".to_owned()],
+                required_commands: Vec::new(),
+                required_paths: Vec::new(),
+                required_env: Vec::new(),
+                optional: false,
+                log_name: format!("{name}.log"),
+                auth: AuthMode::None,
+            },
+            status,
+            exit_code,
+            elapsed: Duration::ZERO,
+            log_path,
+            reason: format!("because {name}"),
+        })
+        .collect()
+    }
+
+    #[test]
+    fn failure_report_handles_missing_zero_codes_and_unreadable_logs() {
+        // A child test process captures the actual public stdout/stderr contract.
+        if let Some(directory) = std::env::var_os("SUP_REPORT_FIXTURE") {
+            let tail = std::env::var("SUP_REPORT_TAIL").unwrap().parse().unwrap();
+            print_summary(&report_results(Path::new(&directory)), None, tail);
+            return;
+        }
+
+        let directory = tempfile::tempdir().unwrap();
+        let raw = format!("{}\n\x1b[31mlast-one\x1b[0m\nlast-two\n", "early\n".repeat(20_000));
+        std::fs::write(directory.path().join("output.log"), &raw).unwrap();
+        for tail in [2, 0] {
+            let output = Command::new(std::env::current_exe().unwrap())
+                .args([
+                    "--exact",
+                    "display::tests::failure_report_handles_missing_zero_codes_and_unreadable_logs",
+                    "--nocapture",
+                ])
+                .env("SUP_REPORT_FIXTURE", directory.path())
+                .env("SUP_REPORT_TAIL", tail.to_string())
+                .output()
+                .unwrap();
+            assert!(output.status.success());
+            let report = String::from_utf8_lossy(&output.stderr);
+            assert_eq!(report.matches("Failure report:").count(), 1);
+            assert!(
+                report.contains("Label missing (missing)\n  reason: because missing\n"),
+                "{report}"
+            );
+            assert!(report.contains("Label zero (zero)\n  exit code: 0\n"), "{report}");
+            assert!(report.contains("Label after (after)\n  exit code: 4\n"), "{report}");
+            assert_eq!(report.contains("cannot read log"), tail == 2, "{report}");
+            assert_eq!(
+                report.matches("  last-one\n  last-two\n").count(),
+                if tail == 2 { 2 } else { 0 }
+            );
+            assert!(!report.contains("early"));
+            assert!(!report.contains('\x1b'));
+            assert!(!report.contains("Label skip"));
+            assert!(!report.contains("Label cancel"));
+            assert_eq!(
+                std::fs::read_to_string(directory.path().join("output.log")).unwrap(),
+                raw
+            );
+        }
+    }
 }

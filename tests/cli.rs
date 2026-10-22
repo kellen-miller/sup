@@ -433,3 +433,89 @@ command = ['/bin/sh', '-c', '''printf '\033]8;;https://example.test\033\\link\03
     assert!(!text.contains("example.test"), "{text}");
     assert!(!text.contains('\x1b'), "{text}");
 }
+
+#[test]
+fn final_failure_report_covers_parallel_process_and_prestart_failures_with_complete_logs() {
+    let directory = tempfile::tempdir().unwrap();
+    let home = directory.path().join("home");
+    let bin = directory.path().join("bin");
+    let config = directory.path().join("synthetic.toml");
+    std::fs::create_dir(&home).unwrap();
+    std::fs::create_dir(&bin).unwrap();
+    std::fs::write(&config, FAILURE_REPORT_CONFIG).unwrap();
+    for tail in [2, 0] {
+        let result = Command::new(env!("CARGO_BIN_EXE_sup"))
+            .args(["--no-tui", "--config"])
+            .arg(&config)
+            .arg("--tail")
+            .arg(tail.to_string())
+            .env_clear()
+            .env("HOME", &home)
+            .env("XDG_CONFIG_HOME", directory.path().join("config"))
+            .env("XDG_CACHE_HOME", directory.path().join("cache"))
+            .env("PATH", &bin)
+            .current_dir(&home)
+            .output()
+            .unwrap();
+        assert_eq!(result.status.code(), Some(1));
+        let stdout = String::from_utf8_lossy(&result.stdout);
+        let stderr = String::from_utf8_lossy(&result.stderr);
+        assert_eq!(stderr.matches("Failure report:").count(), 1);
+        for label in ["Nonzero job (nonzero)", "Spawn job (spawn)", "Required job (required)"] {
+            assert_eq!(stderr.matches(label).count(), 1, "{stderr}");
+        }
+
+        assert!(stderr.contains("exit code: 7"), "{stderr}");
+        assert!(stderr.contains("cannot start ["), "{stderr}");
+        assert!(stderr.contains("missing required requirement"), "{stderr}");
+        let required = stderr.split("Required job (required)").nth(1).unwrap();
+        assert!(!required.contains("exit code:"), "{required}");
+        assert!(!stderr.contains("Successful job (success)"));
+        assert!(!stderr.contains("optional (optional)"));
+        assert!(!stdout.contains("must-not-run"));
+        assert!(!stderr.contains('\x1b'));
+        assert!(!stderr.contains("  first\n"));
+        assert_eq!(stderr.contains("  second\n  third\n"), tail == 2, "{stderr}");
+        let log = stderr
+            .lines()
+            .find_map(|line| line.trim().strip_prefix("log: "))
+            .unwrap();
+        let log = std::path::Path::new(log).parent().unwrap().join("nonzero.log");
+        let raw = std::fs::read_to_string(&log).unwrap();
+        assert_eq!(raw, "first\n\x1b[31msecond\x1b[0m\nthird\n");
+        assert!(stderr.contains(&format!("log: {}", log.display())));
+        assert!(stdout.contains("success: Succeeded"));
+        assert!(stdout.contains("optional: Skipped"));
+    }
+}
+
+const FAILURE_REPORT_CONFIG: &str = r#"version = 1
+[[jobs]]
+name = 'success'
+label = 'Successful job'
+phase = 'parallel'
+command = ['/bin/sh', '-c', 'printf "success-output\n"']
+[[jobs]]
+name = 'nonzero'
+label = 'Nonzero job'
+phase = 'parallel'
+command = ['/bin/sh', '-c', '''printf 'first\n\033[31msecond\033[0m\nthird\n'; exit 7''']
+[[jobs]]
+name = 'spawn'
+label = 'Spawn job'
+phase = 'parallel'
+command = ['/sup-synthetic-missing-command']
+[[jobs]]
+name = 'required'
+label = 'Required job'
+phase = 'parallel'
+optional = false
+required_commands = ['sup-synthetic-missing-requirement']
+command = ['/bin/sh', '-c', 'printf must-not-run']
+[[jobs]]
+name = 'optional'
+phase = 'parallel'
+optional = true
+required_commands = ['sup-synthetic-missing-requirement']
+command = ['/bin/sh', '-c', 'printf must-not-run']
+"#;
