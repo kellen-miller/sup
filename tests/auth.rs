@@ -11,7 +11,7 @@ use std::process::{Child, Command, ExitStatus, Output, Stdio};
 use std::thread;
 use std::time::{Duration, Instant};
 
-const SECRET: &[u8] = b"unique-fixture-secret42\n";
+const SECRET: &[u8] = b"[]ique-fixture-secret42\n";
 
 struct Fixture {
     directory: tempfile::TempDir,
@@ -328,7 +328,8 @@ impl PtyRun {
                     );
                     resized = true;
                 }
-                self.input(b"\x1b[A", deadline);
+                self.input(b"\x1b[A\t\x1b[Z\x1b[5~\x1b[6~\x1b[F", deadline);
+                self.input(b"\x1b[<64;2;2M\x1b[<65;2;2M", deadline);
                 self.input(&secret[..secret.len().saturating_sub(1)], deadline);
                 self.input(b"\r", deadline);
                 submitted = true;
@@ -595,7 +596,18 @@ fn dashboard_password_modal_masks_input_resizes_and_restores_terminal() {
     fixture.jobs(&job("brew", "on-demand", "['brew']"));
     let mut run = PtyRun::spawn(fixture.ui_command());
     assert!(run.finish_tui_prompt(SECRET, Duration::from_secs(5)).success());
-    assert!(String::from_utf8_lossy(&run.output).contains("fixture-brew-complete"));
+    assert!(String::from_utf8_lossy(&run.output).contains("brew: Succeeded"));
+    let run_directory = fs::read_dir(fixture.home.join(".cache/sup/runs"))
+        .unwrap()
+        .next()
+        .unwrap()
+        .unwrap()
+        .path();
+    assert!(
+        fs::read_to_string(run_directory.join("brew.log"))
+            .unwrap()
+            .contains("fixture-brew-complete")
+    );
     fixture.assert_no_secret(&run.output);
     fixture.assert_socket_removed();
 }

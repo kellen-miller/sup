@@ -1,6 +1,6 @@
 # sup
 
-`sup` is a Rust CLI for running local update jobs from a validated TOML config. It keeps job output in per-run logs and provides a terminal dashboard with a bounded, scrollable output view.
+`sup` is a Rust CLI for running local update jobs from a validated TOML config. It keeps job output in per-run logs and provides a terminal dashboard with separate live output panes.
 
 ## Install
 
@@ -27,7 +27,7 @@ Running `sup` or `sup run` executes the selected jobs. `sup list` prints job nam
 
 `sup list` replaces `--list`; `sup plan` replaces `--dry-run`. The Python entry point is removed.
 
-The dashboard follows new output by default. Use Up/Down or Page Up/Page Down to pause and scroll; End resumes following. The footer shows available controls. Resize the terminal to change the visible output area.
+The dashboard shows one labeled output pane per running job below the status area. Every finished pane closes, including failures, and remaining panes expand. Crowded terminals use pages: `[` and `]` change pages; Tab and Shift-Tab select a pane on the current page. Up/Down, Page Up/Page Down, and the mouse wheel scroll the selected pane; End resumes following its output. Each pane keeps its own scroll position. Resize the terminal to change the grid. Password prompts take precedence over navigation.
 
 ## Configuration
 
@@ -56,7 +56,7 @@ Use `auth = "on-demand"` for Homebrew, `"preflight"` to validate sudo immediatel
 
 ## Logs
 
-Each run writes logs under `~/.cache/sup/runs/<run-id>/`. Logs contain complete child output; the in-memory dashboard history is bounded. Old run directories are cleaned after 30 days by default. Use `--log-retention-days N` to change the window or `--no-log-cleanup` to disable cleanup for a run.
+Each run writes logs under `~/.cache/sup/runs/<run-id>/`. Logs contain complete child output; active panes share a bounded in-memory history. After all jobs finish, a failure report lists every failed job, its exit code when available, reason, full log path, and recent output. `--tail N` limits each excerpt to N lines; `--tail 0` hides excerpts. Closing panes or trimming their history does not remove disk logs. Old run directories are cleaned after 30 days by default. Use `--log-retention-days N` to change the window or `--no-log-cleanup` to disable cleanup for a run.
 
 ## Development
 
