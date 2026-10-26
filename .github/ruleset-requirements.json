@@ -1,0 +1,12 @@
+{
+  "checks": [
+    "Rust Format",
+    "Rust Clippy",
+    "Rust Tests (Linux)",
+    "Rust Tests (macOS)",
+    "YAML lint",
+    "Renovate / Config validation",
+    "GitHub Actions / Workflow validation",
+    "Code duplication (CPD)"
+  ]
+}
