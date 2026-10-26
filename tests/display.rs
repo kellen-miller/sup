@@ -5,7 +5,7 @@ use ratatui::backend::TestBackend;
 use ratatui::buffer::{Buffer, Cell};
 use ratatui::style::{Color, Modifier};
 use std::path::PathBuf;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use sup::config::{AuthMode, Job};
 use sup::display::Dashboard;
 use sup::runner::{JobResult, JobStatus, RunEvent};
@@ -97,6 +97,8 @@ fn named_streams_stay_in_separate_panes_and_finished_panes_release_space() {
     assert!(rows.iter().any(|row| row.contains("Label alpha (alpha)")));
     assert!(rows.iter().any(|row| row.contains("Label beta (beta)")));
     finish(&mut dashboard, &jobs[0], JobStatus::Failed);
+    assert!(dashboard.pane("alpha").is_some());
+    dashboard.expire_completed(Instant::now() + Duration::from_millis(500));
     assert!(dashboard.pane("alpha").is_none());
     assert_eq!(dashboard.focused_job(), Some("beta"));
     output(&mut dashboard, "beta", &format!("{}\n", "expanded".repeat(8)));
@@ -104,6 +106,39 @@ fn named_streams_stay_in_separate_panes_and_finished_panes_release_space() {
     assert!(!rows.iter().any(|row| row.contains("ALPHA-ONLY")));
     assert!(rows.iter().any(|row| row.contains(&"expanded".repeat(8))));
     assert!(rows.iter().any(|row| row.contains("failed")));
+}
+
+#[test]
+fn completion_overlay_covers_finished_output_with_status_color() {
+    for (status, label, color) in [
+        (JobStatus::Succeeded, "✓ succeeded", Color::Rgb(158, 206, 106)),
+        (JobStatus::Failed, "✗ failed", Color::Rgb(247, 118, 142)),
+    ] {
+        let jobs = [job("done"), job("running")];
+        let mut dashboard = started(&jobs);
+        output(&mut dashboard, "done", "FINISHED-OUTPUT\n");
+        output(&mut dashboard, "running", "STILL-RUNNING\n");
+        finish(&mut dashboard, &jobs[0], status);
+        assert!(dashboard.pane("done").is_some());
+        let buffer = rendered(&mut dashboard, &jobs);
+        let overlay = text_cell(&buffer, label);
+        assert_eq!(overlay.fg, color);
+        assert_eq!(overlay.bg, Color::Rgb(36, 40, 59));
+        assert!(overlay.modifier.contains(Modifier::BOLD));
+        text_cell(&buffer, "STILL-RUNNING");
+        let frame: String = buffer.content.iter().map(Cell::symbol).collect();
+        assert!(!frame.contains("FINISHED-OUTPUT"));
+    }
+}
+
+#[test]
+fn completion_overlay_handles_tiny_and_narrow_terminals() {
+    let jobs = [job("done")];
+    let mut dashboard = started(&jobs);
+    finish(&mut dashboard, &jobs[0], JobStatus::Succeeded);
+    for (width, height) in [(1, 1), (4, 3), (12, 8), (20, 60), (160, 6)] {
+        assert_eq!(screen(&mut dashboard, &jobs, width, height).len(), height as usize);
+    }
 }
 
 #[test]
@@ -244,6 +279,7 @@ fn independent_scroll_anchors_survive_output_reflow_and_resize() {
     assert!(!dashboard.pane("alpha").unwrap().is_following());
     assert!(dashboard.pane("beta").unwrap().is_following());
     finish(&mut dashboard, &jobs[0], JobStatus::Succeeded);
+    dashboard.expire_completed(Instant::now() + Duration::from_millis(500));
     assert_eq!(dashboard.focused_job(), Some("beta"));
     screen(&mut dashboard, &jobs, 40, 18);
     assert_eq!(dashboard.focused_job(), Some("beta"));
@@ -264,12 +300,14 @@ fn closing_last_pane_on_page_selects_previous_and_prestart_failures_create_no_pa
     assert_eq!(dashboard.focused_job(), Some("three"));
     finish(&mut dashboard, &jobs[2], JobStatus::Cancelled);
     finish(&mut dashboard, &jobs[3], JobStatus::Failed);
+    dashboard.expire_completed(Instant::now() + Duration::from_millis(500));
     let rows = screen(&mut dashboard, &jobs, 80, 24);
     assert_eq!(dashboard.focused_job(), Some("two"));
     assert!(rows[23].contains("1/1"));
     assert!(dashboard.pane("preflight").is_none());
     finish(&mut dashboard, &jobs[0], JobStatus::Skipped);
     finish(&mut dashboard, &jobs[1], JobStatus::Succeeded);
+    dashboard.expire_completed(Instant::now() + Duration::from_millis(500));
     assert!(
         screen(&mut dashboard, &jobs, 80, 24)
             .concat()
@@ -312,6 +350,7 @@ fn history_caps_aggregate_records_bytes_and_each_event_then_releases_on_finish()
     assert!(bytes <= 8 * 1024 * 1024);
     assert!(bytes > 8 * 1024 * 1024 - 32_000);
     finish(&mut dashboard, &jobs[0], JobStatus::Failed);
+    dashboard.expire_completed(Instant::now() + Duration::from_millis(500));
     assert!(dashboard.pane("alpha").is_none());
     output(&mut dashboard, "beta", "still works\n");
     assert_eq!(
