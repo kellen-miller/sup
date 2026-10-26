@@ -11,7 +11,7 @@ use ratatui::backend::CrosstermBackend;
 use ratatui::layout::{Alignment, Constraint, Direction, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, Borders, Paragraph, Row, Table};
+use ratatui::widgets::{Block, Borders, Clear, Paragraph, Row, Table};
 use std::collections::{HashMap, VecDeque};
 use std::io::{self, IsTerminal, Read, Seek, SeekFrom, Write};
 use std::sync::mpsc::Receiver;
@@ -24,6 +24,7 @@ const EVENT_BYTES: usize = 16 * 1024;
 // A full pipe read can complete up to three UTF-8 bytes retained from the previous read.
 const PIPE_EVENT_BYTES: usize = EVENT_BYTES + 3;
 const TRUNCATION_MARKER: &str = " … [event truncated]";
+const COMPLETION_HOLD: Duration = Duration::from_millis(500);
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 struct OutputStyle {
@@ -89,6 +90,11 @@ impl OutputRecord {
     }
 }
 
+struct PaneCompletion {
+    status: String,
+    expires_at: Instant,
+}
+
 pub struct JobPane {
     records: VecDeque<OutputRecord>,
     bytes: usize,
@@ -97,6 +103,7 @@ pub struct JobPane {
     anchor: Option<usize>,
     following: bool,
     height: usize,
+    completion: Option<PaneCompletion>,
 }
 
 impl Default for JobPane {
@@ -109,6 +116,7 @@ impl Default for JobPane {
             anchor: None,
             following: true,
             height: 1,
+            completion: None,
         }
     }
 }
@@ -261,29 +269,50 @@ impl Dashboard {
             }
             RunEvent::Finished(result) => {
                 let name = &result.job.name;
-                if let Some(pane) = self.panes.remove(name) {
-                    self.bytes = self.bytes.saturating_sub(pane.bytes);
-                    self.records = self.records.saturating_sub(pane.records.len());
+                let status = format!("{:?}", result.status).to_lowercase();
+                if let Some(pane) = self.panes.get_mut(name) {
+                    pane.completion = Some(PaneCompletion {
+                        status: status.clone(),
+                        expires_at: Instant::now() + COMPLETION_HOLD,
+                    });
                 }
 
-                self.visible.retain(|job| job != name);
-                self.statuses
-                    .insert(name.clone(), format!("{:?}", result.status).to_lowercase());
-                if self.focus.as_ref() == Some(name) {
-                    let index = self.order.iter().position(|job| job == name).unwrap_or(0);
-                    self.focus = self.order[index..]
-                        .iter()
-                        .find(|job| self.panes.contains_key(*job))
-                        .or_else(|| {
-                            self.order[..index]
-                                .iter()
-                                .rev()
-                                .find(|job| self.panes.contains_key(*job))
-                        })
-                        .cloned();
-                }
+                self.statuses.insert(name.clone(), status);
             }
             RunEvent::RunDirectory(_) => {}
+        }
+    }
+
+    /// Close completed panes whose brief status overlay has expired.
+    pub fn expire_completed(&mut self, now: Instant) {
+        self.panes.retain(|_, pane| {
+            if pane
+                .completion
+                .as_ref()
+                .is_none_or(|completion| now < completion.expires_at)
+            {
+                return true;
+            }
+
+            self.bytes = self.bytes.saturating_sub(pane.bytes);
+            self.records = self.records.saturating_sub(pane.records.len());
+            false
+        });
+        self.visible.retain(|job| self.panes.contains_key(job));
+        if let Some(name) = self.focus.as_ref()
+            && !self.panes.contains_key(name)
+        {
+            let index = self.order.iter().position(|job| job == name).unwrap_or(0);
+            self.focus = self.order[index..]
+                .iter()
+                .find(|job| self.panes.contains_key(*job))
+                .or_else(|| {
+                    self.order[..index]
+                        .iter()
+                        .rev()
+                        .find(|job| self.panes.contains_key(*job))
+                })
+                .cloned();
         }
     }
 
@@ -377,6 +406,7 @@ impl Dashboard {
 }
 
 pub fn render(frame: &mut ratatui::Frame<'_>, dashboard: &mut Dashboard, jobs: &[Job]) {
+    dashboard.expire_completed(Instant::now());
     let area = frame.area();
     if area.width == 0 || area.height == 0 {
         return;
@@ -449,12 +479,7 @@ fn render_jobs(
     });
     let rows = ordered.into_iter().take(job_count).map(|job| {
         let status = statuses.get(&job.name).cloned().unwrap_or_else(|| "queued".to_owned());
-        let color = match status.as_str() {
-            "running" => tokyo_cyan(),
-            "failed" => tokyo_red(),
-            "succeeded" => tokyo_green(),
-            _ => tokyo_muted(),
-        };
+        let color = status_color(&status);
         Row::new(vec![job.label.clone(), job.name.clone(), status]).style(Style::default().fg(color))
     });
     let table = Table::new(
@@ -536,7 +561,10 @@ fn render_panes(frame: &mut ratatui::Frame<'_>, area: Rect, dashboard: &mut Dash
 }
 
 fn render_pane(frame: &mut ratatui::Frame<'_>, area: Rect, pane: &mut JobPane, job: &Job, focused: bool) {
-    let state = if pane.following { "live" } else { "paused" };
+    let state = pane.completion.as_ref().map_or_else(
+        || if pane.following { "live" } else { "paused" },
+        |completion| completion.status.as_str(),
+    );
     let marker = if focused { "* " } else { "" };
     let block = Block::default()
         .title(Span::styled(
@@ -564,6 +592,27 @@ fn render_pane(frame: &mut ratatui::Frame<'_>, area: Rect, pane: &mut JobPane, j
     let mut padded = vec![Line::default(); pane.height.saturating_sub(lines.len())];
     padded.extend(lines);
     frame.render_widget(Paragraph::new(padded).alignment(Alignment::Left), inner);
+    if let Some(completion) = &pane.completion {
+        let symbol = match completion.status.as_str() {
+            "succeeded" => "✓ ",
+            "failed" => "✗ ",
+            _ => "",
+        };
+        frame.render_widget(Clear, inner);
+        frame.render_widget(Block::default().style(Style::default().bg(tokyo_panel())), inner);
+        let badge = Rect::new(inner.x, inner.y + inner.height / 2, inner.width, 1);
+        frame.render_widget(
+            Paragraph::new(format!("{symbol}{}", completion.status))
+                .alignment(Alignment::Center)
+                .style(
+                    Style::default()
+                        .fg(status_color(&completion.status))
+                        .bg(tokyo_panel())
+                        .add_modifier(Modifier::BOLD),
+                ),
+            badge,
+        );
+    }
 }
 
 fn render_hint(frame: &mut ratatui::Frame<'_>, area: Rect, dashboard: &Dashboard) {
@@ -632,7 +681,7 @@ pub fn run(
                 .map_err(|error| error.to_string())?;
             last_draw = Instant::now();
         }
-        if disconnected {
+        if disconnected && dashboard.panes.values().all(|pane| pane.completion.is_none()) {
             break;
         }
         if event::poll(Duration::from_millis(15)).map_err(|error| error.to_string())? {
@@ -901,6 +950,15 @@ fn tokyo_bg() -> Color {
     Color::Rgb(26, 27, 38)
 }
 
+fn status_color(status: &str) -> Color {
+    match status {
+        "running" => tokyo_cyan(),
+        "failed" => tokyo_red(),
+        "succeeded" => tokyo_green(),
+        _ => tokyo_muted(),
+    }
+}
+
 fn tokyo_panel() -> Color {
     Color::Rgb(36, 40, 59)
 }
@@ -1006,12 +1064,12 @@ fn restore_screen(output: &mut impl Write) -> io::Result<()> {
 
 #[cfg(test)]
 mod tests {
-    use super::print_summary;
+    use super::{Dashboard, print_summary};
     use crate::config::{AuthMode, Job};
-    use crate::runner::{JobResult, JobStatus};
+    use crate::runner::{JobResult, JobStatus, RunEvent};
     use std::path::Path;
     use std::process::Command;
-    use std::time::Duration;
+    use std::time::{Duration, Instant};
 
     fn report_results(directory: &Path) -> Vec<JobResult> {
         [
@@ -1048,6 +1106,38 @@ mod tests {
             reason: format!("because {name}"),
         })
         .collect()
+    }
+
+    #[test]
+    fn completion_holds_pane_until_deadline_then_releases_history_and_focus() {
+        let results = report_results(Path::new("unused"));
+        let jobs: Vec<Job> = results[..2].iter().map(|result| result.job.clone()).collect();
+        let mut dashboard = Dashboard::new(&jobs);
+        for job in &jobs {
+            dashboard.apply_event(RunEvent::Started(job.name.clone()));
+            dashboard.apply_event(RunEvent::Output {
+                job: job.name.clone(),
+                text: "retained output\n".to_owned(),
+            });
+        }
+
+        let before = Instant::now();
+        dashboard.apply_event(RunEvent::Finished(Box::new(results[0].clone())));
+        let after = Instant::now();
+        let deadline = dashboard.panes[&jobs[0].name].completion.as_ref().unwrap().expires_at;
+        assert!(deadline >= before + Duration::from_millis(500));
+        assert!(deadline <= after + Duration::from_millis(500));
+        let bytes = dashboard.bytes;
+        dashboard.expire_completed(deadline - Duration::from_millis(1));
+        assert!(dashboard.pane(&jobs[0].name).is_some());
+        assert_eq!(dashboard.bytes, bytes);
+        assert_eq!(dashboard.focused_job(), Some(jobs[0].name.as_str()));
+        assert_eq!(dashboard.statuses[&jobs[0].name], "failed");
+        dashboard.expire_completed(deadline);
+        assert!(dashboard.pane(&jobs[0].name).is_none());
+        assert_eq!(dashboard.focused_job(), Some(jobs[1].name.as_str()));
+        assert_eq!(dashboard.bytes, dashboard.panes[&jobs[1].name].bytes);
+        assert_eq!(dashboard.records, 1);
     }
 
     #[test]

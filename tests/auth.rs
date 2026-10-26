@@ -13,6 +13,26 @@ use std::time::{Duration, Instant};
 
 const SECRET: &[u8] = b"[]ique-fixture-secret42\n";
 
+#[test]
+fn final_job_completion_overlay_precedes_terminal_exit() {
+    for (code, overlay) in [(0, "✓ succeeded"), (7, "✗ failed")] {
+        let fixture = Fixture::new();
+        fixture.jobs(&job(
+            "last",
+            "none",
+            &format!("['/bin/sh', '-c', 'printf done; exit {code}']"),
+        ));
+        let started = Instant::now();
+        let mut run = PtyRun::spawn(fixture.ui_command());
+        let status = run.finish(&[], Duration::from_secs(5));
+        assert_eq!(status.success(), code == 0);
+        assert!(started.elapsed() >= Duration::from_millis(500));
+        let output = String::from_utf8_lossy(&run.output);
+        assert!(output.contains(overlay), "{output}");
+        assert_eq!(output.contains("Failure report:"), code != 0);
+    }
+}
+
 struct Fixture {
     directory: tempfile::TempDir,
     home: PathBuf,
