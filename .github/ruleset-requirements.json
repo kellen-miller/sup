@@ -5,8 +5,8 @@
     "Package tests and release build (Linux)",
     "Package tests and release build (macOS)",
     "Style validation",
-    "Renovate / Config validation",
-    "GitHub Actions / Workflow validation",
+    "renovate.json / Config validation",
+    ".github/workflows / Workflow validation",
     "JSCPD scan"
   ]
 }
