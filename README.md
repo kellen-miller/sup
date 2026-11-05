@@ -91,14 +91,14 @@ GitHub Actions reports each validation separately:
 
 | Check | Scope |
 | --- | --- |
-| Rust Format | Shared Rust formatting policy |
-| Rust Clippy | Shared compiler and Clippy policy |
-| Rust Tests (Linux) / Rust Tests (macOS) | Tests, doctests and release builds on each OS |
-| YAML lint | Repository YAML formatting |
-| GitHub Actions / Workflow validation | Workflow syntax and security policy |
-| Renovate / Config validation | Renovate configuration |
-| Code duplication (CPD) | Duplicate code across the repository |
+| Formatting validation | Shared Rust formatting policy |
+| Static analysis | Shared compiler and Clippy policy |
+| Package tests and release build (Linux) / Package tests and release build (macOS) | Tests, doctests and release builds on each OS |
+| Style validation | Repository YAML formatting |
+| .github/workflows / Workflow validation | Workflow syntax and security policy |
+| renovate.json / Config validation | Renovate configuration |
+| JSCPD scan | Duplicate code across the repository |
 
-Workflow and Renovate validation jobs appear on every PR; their validation steps skip when their inputs have not changed. CPD uses the shared `config/jscpd.json` from the CI revision pinned in `.github/workflows/shared-ci.yaml`, with a 5% duplication limit. A repository `.jscpd.json` overrides those defaults when present; SUP does not need a copied config.
+Workflow and Renovate validation jobs appear on every PR; their validation steps skip when their inputs have not changed. CPD uses the shared `config/jscpd.json` from the CI revision pinned in `.github/workflows/code-duplication.yaml`, with a 5% duplication limit. A repository `.jscpd.json` overrides those defaults when present; SUP does not need a copied config.
 
-YAML lint is pinned independently from the Rust package. YAML rules use two-space indentation, block collections, and no line-length limit.
+Style validation is pinned independently from the Rust package. YAML rules use two-space indentation, block collections, and no line-length limit.
