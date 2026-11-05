@@ -11,7 +11,7 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  yaml:
+  yaml-style-validation:
     name: YAML / Style validation
     runs-on: ubuntu-latest
     steps:

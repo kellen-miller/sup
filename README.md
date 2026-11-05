@@ -97,7 +97,7 @@ GitHub Actions reports each validation separately:
 | YAML / Style validation | Repository YAML formatting |
 | GitHub Actions / Workflow validation | Workflow syntax and security policy |
 | Renovate / Config validation | Renovate configuration |
-| Code duplication / Duplicate detection | Duplicate code across the repository |
+| Code duplication / JSCPD scan | Duplicate code across the repository |
 
 Workflow and Renovate validation jobs appear on every PR; their validation steps skip when their inputs have not changed. CPD uses the shared `config/jscpd.json` from the CI revision pinned in `.github/workflows/code-duplication.yaml`, with a 5% duplication limit. A repository `.jscpd.json` overrides those defaults when present; SUP does not need a copied config.
 

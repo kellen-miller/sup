@@ -47,4 +47,4 @@ The default config is `$XDG_CONFIG_HOME/sup/config.toml`, or `$HOME/.config/sup/
 
 ## CI
 
-Check names and scopes are listed in [README.md](README.md#development). Before pushing, also run CPD with the version pinned by the shared action. Use the repository `.jscpd.json` when present; otherwise reference `config/jscpd.json` from the CI revision pinned in `.github/workflows/shared-ci.yaml`. Keep the default policy shared.
+Check names and scopes are listed in [README.md](README.md#development). Before pushing, also run CPD with the version pinned by the shared action. Use the repository `.jscpd.json` when present; otherwise reference `config/jscpd.json` from the CI revision pinned in `.github/workflows/code-duplication.yaml`. Keep the default policy shared.

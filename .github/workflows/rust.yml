@@ -11,7 +11,7 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  format:
+  formatting-validation:
     name: Rust / Formatting validation
     runs-on: ubuntu-latest
     steps:
@@ -22,7 +22,7 @@ jobs:
         with:
           checks: fmt
 
-  clippy:
+  static-analysis:
     name: Rust / Static analysis
     runs-on: ubuntu-latest
     steps:
@@ -33,7 +33,7 @@ jobs:
         with:
           checks: clippy
 
-  tests-linux:
+  package-tests-linux:
     name: Rust / Package tests and release build (Linux)
     runs-on: ubuntu-latest
     steps:
@@ -45,7 +45,7 @@ jobs:
           checks: test build
           build-profile: release
 
-  tests-macos:
+  package-tests-macos:
     name: Rust / Package tests and release build (macOS)
     runs-on: macos-latest
     steps:
