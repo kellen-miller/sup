@@ -1,12 +1,12 @@
 {
   "checks": [
-    "Rust Format",
-    "Rust Clippy",
-    "Rust Tests (Linux)",
-    "Rust Tests (macOS)",
-    "YAML lint",
+    "Rust / Formatting validation",
+    "Rust / Static analysis",
+    "Rust / Package tests and release build (Linux)",
+    "Rust / Package tests and release build (macOS)",
+    "YAML / Style validation",
     "Renovate / Config validation",
     "GitHub Actions / Workflow validation",
-    "Code duplication (CPD)"
+    "Code duplication / Duplicate detection"
   ]
 }
