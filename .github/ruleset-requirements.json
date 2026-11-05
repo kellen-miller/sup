@@ -1,12 +1,12 @@
 {
   "checks": [
-    "Rust / Formatting validation",
-    "Rust / Static analysis",
-    "Rust / Package tests and release build (Linux)",
-    "Rust / Package tests and release build (macOS)",
-    "YAML / Style validation",
+    "Formatting validation",
+    "Static analysis",
+    "Package tests and release build (Linux)",
+    "Package tests and release build (macOS)",
+    "Style validation",
     "Renovate / Config validation",
     "GitHub Actions / Workflow validation",
-    "Code duplication / JSCPD scan"
+    "JSCPD scan"
   ]
 }

@@ -12,7 +12,7 @@ concurrency:
 
 jobs:
   formatting-validation:
-    name: Rust / Formatting validation
+    name: Formatting validation
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
@@ -23,7 +23,7 @@ jobs:
           checks: fmt
 
   static-analysis:
-    name: Rust / Static analysis
+    name: Static analysis
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
@@ -34,7 +34,7 @@ jobs:
           checks: clippy
 
   package-tests-linux:
-    name: Rust / Package tests and release build (Linux)
+    name: Package tests and release build (Linux)
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
@@ -46,7 +46,7 @@ jobs:
           build-profile: release
 
   package-tests-macos:
-    name: Rust / Package tests and release build (macOS)
+    name: Package tests and release build (macOS)
     runs-on: macos-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
