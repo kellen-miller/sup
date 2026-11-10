@@ -4,7 +4,7 @@ version = 1
 
 [aliases]
 brew = ["brew-link-node-tools", "brew-upgrade", "brew-relink-node-tools", "brew-cleanup"]
-zimfw = ["zimfw-upgrade", "zimfw-update"]
+zimfw = ["zimfw-update"]
 cargo = ["cargo-install-update"]
 npm = ["node-package-managers"]
 pnpm = ["node-package-managers"]
@@ -45,15 +45,6 @@ phase = "core"
 command = ["brew", "cleanup", "--prune=all"]
 required_commands = ["brew"]
 optional = false
-
-[[jobs]]
-name = "zimfw-upgrade"
-label = "Zim upgrade"
-phase = "core"
-command = ["zsh", "-lc", "source \"$HOME/.zim/init.zsh\"; zimfw upgrade"]
-required_commands = ["zsh"]
-required_paths = ["$HOME/.zim/init.zsh"]
-optional = true
 
 [[jobs]]
 name = "zimfw-update"
