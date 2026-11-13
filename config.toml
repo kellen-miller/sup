@@ -10,8 +10,11 @@ npm = ["node-package-managers"]
 pnpm = ["node-package-managers"]
 
 [run]
-retention_days = 30
+# Calendar days of run logs to keep besides today; 0 keeps only today's runs.
+retention_days = 0
 cleanup_logs = true
+# Copy the Markdown failure report to the clipboard when a job fails.
+copy_failure_report = true
 
 [[jobs]]
 name = "brew-link-node-tools"
@@ -91,7 +94,7 @@ optional = true
 [[jobs]]
 name = "rustup"
 label = "Rust toolchain"
-phase = "parallel"
+phase = "core"
 command = ["sup-rust-update"]
 required_commands = ["rustup"]
 optional = true

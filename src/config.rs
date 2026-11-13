@@ -24,13 +24,16 @@ pub struct RunConfig {
     pub retention_days: i64,
     #[serde(default = "default_true")]
     pub cleanup_logs: bool,
+    #[serde(default = "default_true")]
+    pub copy_failure_report: bool,
 }
 
 impl Default for RunConfig {
     fn default() -> Self {
         Self {
-            retention_days: 30,
+            retention_days: 0,
             cleanup_logs: true,
+            copy_failure_report: true,
         }
     }
 }
@@ -157,11 +160,12 @@ pub struct LoadedConfig {
     pub aliases: HashMap<String, Vec<String>>,
     pub retention_days: i64,
     pub cleanup_logs: bool,
+    pub copy_failure_report: bool,
     pub source: String,
 }
 
 fn default_retention() -> i64 {
-    30
+    0
 }
 fn default_true() -> bool {
     true
@@ -252,6 +256,13 @@ pub fn normalize(
         if !valid_filename(&log_name) {
             return Err(format!("job {} log_name must be a simple filename", job.name));
         }
+        if log_name == crate::logs::SUMMARY_FILE {
+            return Err(format!(
+                "job {} log_name {log_name} is reserved for the run summary",
+                job.name
+            ));
+        }
+
         if !logs.insert(log_name.clone()) {
             return Err(format!("duplicate log filename: {log_name}"));
         }
@@ -290,6 +301,7 @@ pub fn normalize(
         aliases: raw.aliases,
         retention_days: raw.run.retention_days,
         cleanup_logs: raw.run.cleanup_logs,
+        copy_failure_report: raw.run.copy_failure_report,
         source,
     })
 }

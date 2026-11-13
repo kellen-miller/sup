@@ -1,8 +1,9 @@
 mod output;
+mod summary;
 
 use crate::auth::{AuthRequest, Password, PasswordReply, PlainPrompt};
 use crate::config::Job;
-use crate::runner::{Cancellation, JobResult, JobStatus, RunEvent};
+use crate::runner::{Cancellation, RunEvent};
 use crossterm::event::{self, Event, KeyCode, KeyModifiers, MouseEventKind};
 use crossterm::execute;
 use output::OutputParser;
@@ -13,10 +14,12 @@ use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Clear, Paragraph, Row, Table};
 use std::collections::{HashMap, VecDeque};
-use std::io::{self, IsTerminal, Read, Seek, SeekFrom, Write};
+use std::io::{self, IsTerminal, Write};
 use std::sync::mpsc::Receiver;
 use std::time::{Duration, Instant};
 use zeroize::Zeroize;
+
+pub use summary::{SummaryOptions, print_summary};
 
 const HISTORY_EVENTS: usize = 10_000;
 const HISTORY_BYTES: usize = 8 * 1024 * 1024;
@@ -836,82 +839,6 @@ fn plain_run(
     Ok(log_dir)
 }
 
-pub fn print_summary(results: &[JobResult], log_dir: Option<&std::path::Path>, tail_lines: usize) {
-    for result in results {
-        println!(
-            "{}: {:?} ({:.1}s)",
-            result.job.name,
-            result.status,
-            result.elapsed.as_secs_f64()
-        );
-        if result.status != JobStatus::Failed {
-            if !result.reason.is_empty() {
-                println!("  {}", result.reason);
-            }
-
-            if let Some(path) = &result.log_path {
-                println!("  log: {}", path.display());
-            }
-        }
-    }
-
-    if results.iter().any(|result| result.status == JobStatus::Failed) {
-        eprintln!("Failure report:");
-        for result in results.iter().filter(|result| result.status == JobStatus::Failed) {
-            eprintln!("{} ({})", result.job.label, result.job.name);
-            if let Some(code) = result.exit_code {
-                eprintln!("  exit code: {code}");
-            }
-
-            if !result.reason.is_empty() {
-                eprintln!("  reason: {}", result.reason);
-            }
-
-            if let Some(path) = &result.log_path {
-                eprintln!("  log: {}", path.display());
-                if tail_lines > 0 {
-                    print_log_tail(path, tail_lines);
-                }
-            }
-        }
-    }
-
-    if let Some(path) = log_dir {
-        println!("Run logs: {}", path.display());
-    }
-}
-
-fn print_log_tail(path: &std::path::Path, tail_lines: usize) {
-    let mut file = match std::fs::File::open(path) {
-        Ok(file) => file,
-        Err(error) => {
-            eprintln!("  cannot read log {}: {error}", path.display());
-            return;
-        }
-    };
-    let length = file.metadata().map(|metadata| metadata.len()).unwrap_or(0);
-    if let Err(error) = file.seek(SeekFrom::Start(length.saturating_sub(64 * 1024))) {
-        eprintln!("  cannot seek log {}: {error}", path.display());
-        return;
-    }
-    let mut bytes = Vec::new();
-    if let Err(error) = file.take(64 * 1024).read_to_end(&mut bytes) {
-        eprintln!("  cannot read log {}: {error}", path.display());
-        return;
-    }
-    let tail = OutputParser::default().clean(&String::from_utf8_lossy(&bytes));
-    for line in tail
-        .lines()
-        .rev()
-        .take(tail_lines)
-        .collect::<Vec<_>>()
-        .into_iter()
-        .rev()
-    {
-        eprintln!("  {line}");
-    }
-}
-
 fn render_password(frame: &mut ratatui::Frame<'_>, job: &str, prompt: &str, length: usize) {
     let area = frame.area();
     if area.width == 0 || area.height == 0 {
@@ -1064,10 +991,10 @@ fn restore_screen(output: &mut impl Write) -> io::Result<()> {
 
 #[cfg(test)]
 mod tests {
-    use super::{Dashboard, print_summary};
+    use super::{Dashboard, SummaryOptions, print_summary};
     use crate::config::{AuthMode, Job};
     use crate::runner::{JobResult, JobStatus, RunEvent};
-    use std::path::Path;
+    use std::path::{Path, PathBuf};
     use std::process::Command;
     use std::time::{Duration, Instant};
 
@@ -1145,7 +1072,14 @@ mod tests {
         // A child test process captures the actual public stdout/stderr contract.
         if let Some(directory) = std::env::var_os("SUP_REPORT_FIXTURE") {
             let tail = std::env::var("SUP_REPORT_TAIL").unwrap().parse().unwrap();
-            print_summary(&report_results(Path::new(&directory)), None, tail);
+            let options = SummaryOptions {
+                home: PathBuf::new(),
+                elapsed: Duration::ZERO,
+                tail_lines: tail,
+                copy_failure_report: false,
+                color: false,
+            };
+            print_summary(&report_results(Path::new(&directory)), None, &options);
             return;
         }
 
@@ -1165,16 +1099,15 @@ mod tests {
                 .unwrap();
             assert!(output.status.success());
             let report = String::from_utf8_lossy(&output.stderr);
-            assert_eq!(report.matches("Failure report:").count(), 1);
             assert!(
-                report.contains("Label missing (missing)\n  reason: because missing\n"),
+                report.contains("✗ Label missing (missing) · 0.0s\n   reason  because missing\n"),
                 "{report}"
             );
-            assert!(report.contains("Label zero (zero)\n  exit code: 0\n"), "{report}");
-            assert!(report.contains("Label after (after)\n  exit code: 4\n"), "{report}");
+            assert!(report.contains("✗ Label zero (zero) · exit 0 · 0.0s\n"), "{report}");
+            assert!(report.contains("✗ Label after (after) · exit 4 · 0.0s\n"), "{report}");
             assert_eq!(report.contains("cannot read log"), tail == 2, "{report}");
             assert_eq!(
-                report.matches("  last-one\n  last-two\n").count(),
+                report.matches("   │ last-one\n   │ last-two\n").count(),
                 if tail == 2 { 2 } else { 0 }
             );
             assert!(!report.contains("early"));

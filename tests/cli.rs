@@ -460,33 +460,77 @@ fn final_failure_report_covers_parallel_process_and_prestart_failures_with_compl
         assert_eq!(result.status.code(), Some(1));
         let stdout = String::from_utf8_lossy(&result.stdout);
         let stderr = String::from_utf8_lossy(&result.stderr);
-        assert_eq!(stderr.matches("Failure report:").count(), 1);
         for label in ["Nonzero job (nonzero)", "Spawn job (spawn)", "Required job (required)"] {
-            assert_eq!(stderr.matches(label).count(), 1, "{stderr}");
+            assert_eq!(stderr.matches(&format!("✗ {label}")).count(), 1, "{stderr}");
         }
 
-        assert!(stderr.contains("exit code: 7"), "{stderr}");
+        assert!(stderr.contains("✗ Nonzero job (nonzero) · exit 7"), "{stderr}");
         assert!(stderr.contains("cannot start ["), "{stderr}");
         assert!(stderr.contains("missing required requirement"), "{stderr}");
         let required = stderr.split("Required job (required)").nth(1).unwrap();
-        assert!(!required.contains("exit code:"), "{required}");
+        assert!(!required.contains(" · exit"), "{required}");
         assert!(!stderr.contains("Successful job (success)"));
         assert!(!stderr.contains("optional (optional)"));
         assert!(!stdout.contains("must-not-run"));
         assert!(!stderr.contains('\x1b'));
-        assert!(!stderr.contains("  first\n"));
-        assert_eq!(stderr.contains("  second\n  third\n"), tail == 2, "{stderr}");
+        assert!(!stdout.contains('\x1b'));
+        assert!(!stderr.contains("│ first\n"));
+        assert_eq!(stderr.contains("│ second\n   │ third\n"), tail == 2, "{stderr}");
         let log = stderr
             .lines()
-            .find_map(|line| line.trim().strip_prefix("log: "))
+            .find_map(|line| line.trim().strip_prefix("log     ~/"))
+            .map(|relative| home.join(relative))
             .unwrap();
-        let log = std::path::Path::new(log).parent().unwrap().join("nonzero.log");
-        let raw = std::fs::read_to_string(&log).unwrap();
+        let run_dir = log.parent().unwrap();
+        let raw = std::fs::read_to_string(run_dir.join("nonzero.log")).unwrap();
         assert_eq!(raw, "first\n\x1b[31msecond\x1b[0m\nthird\n");
-        assert!(stderr.contains(&format!("log: {}", log.display())));
-        assert!(stdout.contains("success: Succeeded"));
-        assert!(stdout.contains("optional: Skipped"));
+        assert!(stdout.contains(" ✓ success "), "{stdout}");
+        assert!(stdout.contains(" ○ optional "), "{stdout}");
+        assert!(stdout.contains("1 passed · 3 failed · 1 skipped"), "{stdout}");
     }
+}
+
+#[test]
+fn run_summary_markdown_is_written_and_printed_by_last() {
+    let directory = tempfile::tempdir().unwrap();
+    let home = directory.path().join("home");
+    let bin = directory.path().join("bin");
+    let config = directory.path().join("synthetic.toml");
+    std::fs::create_dir(&home).unwrap();
+    std::fs::create_dir(&bin).unwrap();
+    std::fs::write(&config, FAILURE_REPORT_CONFIG).unwrap();
+    let sup = |args: &[&str]| {
+        Command::new(env!("CARGO_BIN_EXE_sup"))
+            .args(args)
+            .env_clear()
+            .env("HOME", &home)
+            .env("PATH", &bin)
+            .current_dir(&home)
+            .output()
+            .unwrap()
+    };
+    let missing = sup(&["last"]);
+    assert_eq!(missing.status.code(), Some(1));
+    assert!(String::from_utf8_lossy(&missing.stderr).contains("no run summary found"));
+
+    let run = sup(&["--no-tui", "--tail", "2", "--config", config.to_str().unwrap()]);
+    assert_eq!(run.status.code(), Some(1));
+    let stdout = String::from_utf8_lossy(&run.stdout);
+    assert!(stdout.contains("1 passed · 3 failed · 1 skipped"), "{stdout}");
+    let stderr = String::from_utf8_lossy(&run.stderr);
+    assert!(stderr.contains("cannot copy failure report"), "{stderr}");
+    let last = sup(&["last"]);
+    assert!(last.status.success());
+    let summary = String::from_utf8_lossy(&last.stdout);
+    assert!(summary.contains("| ✗ | nonzero | "), "{summary}");
+    assert!(summary.contains("| ○ | optional | "), "{summary}");
+    assert!(summary.contains("## ✗ Nonzero job (`nonzero`)"), "{summary}");
+    assert!(summary.contains("- Exit code: 7"), "{summary}");
+    assert!(summary.contains("second\nthird\n````"), "{summary}");
+    assert!(!summary.contains('\x1b'), "{summary}");
+
+    let quiet = sup(&["--no-tui", "--no-copy", "--config", config.to_str().unwrap()]);
+    assert!(!String::from_utf8_lossy(&quiet.stderr).contains("copy failure report"));
 }
 
 const FAILURE_REPORT_CONFIG: &str = r#"version = 1

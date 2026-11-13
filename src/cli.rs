@@ -25,6 +25,8 @@ struct Cli {
     no_log_cleanup: bool,
     #[arg(long, global = true)]
     no_tui: bool,
+    #[arg(long, global = true)]
+    no_copy: bool,
     #[command(subcommand)]
     command: Option<Command>,
 }
@@ -34,6 +36,12 @@ enum Command {
     List,
     Plan,
     Run,
+    /// Print the latest run's Markdown summary.
+    Last {
+        /// Copy the summary to the clipboard instead of printing it.
+        #[arg(long)]
+        copy: bool,
+    },
     Config(ConfigCommand),
 }
 
@@ -48,6 +56,7 @@ struct RunSettings {
     tail: usize,
     retention_days: Option<i64>,
     no_log_cleanup: bool,
+    no_copy: bool,
 }
 
 #[derive(Subcommand)]
@@ -84,6 +93,10 @@ where
     if let Some(Command::Config(config_command)) = cli.command {
         return run_config(config_command.command, cli.config.as_deref(), &home, &env);
     }
+
+    if let Some(Command::Last { copy }) = cli.command {
+        return last(&home, copy);
+    }
     let loaded = match config::load(cli.config.as_deref(), &home, &env) {
         Ok(config) => config,
         Err(error) => {
@@ -105,6 +118,7 @@ where
             tail: cli.tail,
             retention_days: cli.log_retention_days,
             no_log_cleanup: cli.no_log_cleanup,
+            no_copy: cli.no_copy,
         },
         loaded,
         selected,
@@ -188,50 +202,98 @@ fn dispatch(
             }
             0
         }
-        Command::Run => {
-            let cancellation = Cancellation::new();
-            let options = RunOptions {
-                home,
-                retention_days: settings.retention_days.unwrap_or(loaded.retention_days),
-                cleanup_logs: loaded.cleanup_logs && !settings.no_log_cleanup,
-                request_color: !settings.no_tui && std::io::stdout().is_terminal() && std::io::stdin().is_terminal(),
-            };
-            let (events_tx, events_rx) = std::sync::mpsc::sync_channel(128);
-            let (auth_tx, auth_rx) = std::sync::mpsc::sync_channel(8);
-            let worker_cancel = cancellation.clone();
-            let worker_jobs = selected.clone();
-            let worker =
-                std::thread::spawn(move || runner::run(&worker_jobs, options, events_tx, auth_tx, worker_cancel));
-            let displayed = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                display::run(&selected, events_rx, auth_rx, cancellation.clone(), settings.no_tui)
-            }))
-            .unwrap_or_else(|_| Err("dashboard panicked".to_owned()));
-            if displayed.is_err() {
-                cancellation.cancel();
+        Command::Run => run_jobs(&settings, &loaded, &selected, home),
+        Command::Config(_) | Command::Last { .. } => unreachable!(),
+    }
+}
+
+/// Runs the selected jobs on a worker thread while the display consumes events, then prints the summary.
+fn run_jobs(settings: &RunSettings, loaded: &config::LoadedConfig, selected: &[config::Job], home: PathBuf) -> i32 {
+    let started = std::time::Instant::now();
+    let cancellation = Cancellation::new();
+    let home_dir = home.clone();
+    let interactive = !settings.no_tui && std::io::stdout().is_terminal() && std::io::stdin().is_terminal();
+    let options = RunOptions {
+        home,
+        retention_days: settings.retention_days.unwrap_or(loaded.retention_days),
+        cleanup_logs: loaded.cleanup_logs && !settings.no_log_cleanup,
+        request_color: interactive,
+    };
+    let (events_tx, events_rx) = std::sync::mpsc::sync_channel(128);
+    let (auth_tx, auth_rx) = std::sync::mpsc::sync_channel(8);
+    let worker_cancel = cancellation.clone();
+    let worker_jobs = selected.to_vec();
+    let worker = std::thread::spawn(move || runner::run(&worker_jobs, options, events_tx, auth_tx, worker_cancel));
+    let displayed = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        display::run(selected, events_rx, auth_rx, cancellation.clone(), settings.no_tui)
+    }))
+    .unwrap_or_else(|_| Err("dashboard panicked".to_owned()));
+    if displayed.is_err() {
+        cancellation.cancel();
+    }
+    let summary = display::SummaryOptions {
+        home: home_dir,
+        elapsed: started.elapsed(),
+        tail_lines: settings.tail,
+        copy_failure_report: loaded.copy_failure_report && !settings.no_copy,
+        color: interactive && std::env::var_os("NO_COLOR").is_none(),
+    };
+    match worker.join() {
+        Ok(Ok(results)) => match displayed {
+            Ok(log_dir) => {
+                display::print_summary(&results, log_dir.as_deref(), &summary);
+                runner::exit_code(&results, &cancellation)
             }
-            match worker.join() {
-                Ok(Ok(results)) => match displayed {
-                    Ok(log_dir) => {
-                        display::print_summary(&results, log_dir.as_deref(), settings.tail);
-                        runner::exit_code(&results, &cancellation)
-                    }
-                    Err(error) => {
-                        eprintln!("sup: dashboard failed: {error}");
-                        display::print_summary(&results, None, settings.tail);
-                        1
-                    }
-                },
-                Ok(Err(error)) => {
-                    eprintln!("sup: {error}");
-                    1
-                }
-                Err(_) => {
-                    eprintln!("sup: runner failed unexpectedly");
-                    1
-                }
+            Err(error) => {
+                eprintln!("sup: dashboard failed: {error}");
+                display::print_summary(&results, None, &summary);
+                1
             }
+        },
+        Ok(Err(error)) => {
+            eprintln!("sup: {error}");
+            1
         }
-        Command::Config(_) => unreachable!(),
+        Err(_) => {
+            eprintln!("sup: runner failed unexpectedly");
+            1
+        }
+    }
+}
+
+fn last(home: &std::path::Path, copy: bool) -> i32 {
+    let path = match crate::logs::latest_summary(home) {
+        Ok(Some(path)) => path,
+        Ok(None) => {
+            eprintln!("sup: no run summary found");
+            return 1;
+        }
+        Err(error) => {
+            eprintln!("sup: cannot read run logs: {error}");
+            return 1;
+        }
+    };
+    let text = match fs::read_to_string(&path) {
+        Ok(text) => text,
+        Err(error) => {
+            eprintln!("sup: cannot read {}: {error}", path.display());
+            return 1;
+        }
+    };
+    if !copy {
+        print!("{text}");
+        return 0;
+    }
+
+    match crate::clipboard::copy(&text) {
+        Ok(method) => {
+            eprintln!("📋 copied {} via {method}", path.display());
+            0
+        }
+        Err(error) => {
+            eprintln!("sup: cannot copy {}: {error}", path.display());
+            1
+        }
     }
 }
 

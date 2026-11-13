@@ -19,11 +19,12 @@ sup [--config FILE] [--only SELECTOR]... [--skip SELECTOR]... [--no-tui]
 sup run
 sup list
 sup plan
+sup last [--copy]
 sup config init [--output FILE]
 sup config migrate --from FILE --to FILE
 ```
 
-Running `sup` or `sup run` executes the selected jobs. `sup list` prints job names. `sup plan` shows the config source, selected order, phase, auth mode, and command without running jobs. Selectors accept job names or aliases; repeated and comma-separated selectors are supported, and skipped jobs take precedence. `--tail`, `--log-retention-days`, and `--no-log-cleanup` control output and log retention. `--no-tui` uses the plain reporter.
+Running `sup` or `sup run` executes the selected jobs. `sup list` prints job names. `sup plan` shows the config source, selected order, phase, auth mode, and command without running jobs. Selectors accept job names or aliases; repeated and comma-separated selectors are supported, and skipped jobs take precedence. `--tail`, `--log-retention-days`, and `--no-log-cleanup` control output and log retention. `--no-copy` skips copying the failure report. `--no-tui` uses the plain reporter. `sup last` prints the latest run's Markdown summary; `sup last --copy` copies it to the clipboard instead.
 
 `sup list` replaces `--list`; `sup plan` replaces `--dry-run`. The Python entry point is removed.
 
@@ -58,7 +59,13 @@ Use `auth = "on-demand"` for Homebrew, `"preflight"` to validate sudo immediatel
 
 ## Logs
 
-Each run writes logs under `~/.cache/sup/runs/<run-id>/`. Logs contain complete child output; active panes share a bounded in-memory history. After all jobs finish, a failure report lists every failed job, its exit code when available, reason, full log path, and recent output. `--tail N` limits each excerpt to N lines; `--tail 0` hides excerpts. Closing panes or trimming their history does not remove disk logs. Old run directories are cleaned after 30 days by default. Use `--log-retention-days N` to change the window or `--no-log-cleanup` to disable cleanup for a run.
+Each run writes logs under `~/.cache/sup/runs/<run-id>/`. Logs contain complete child output; active panes share a bounded in-memory history. Closing panes or trimming their history does not remove disk logs.
+
+After all jobs finish, SUP prints a checklist with each job's status, duration and exit code or skip reason, followed by totals, the run directory, and the run summary path. Each failed job then lists its label, exit code when available, reason, log path, and recent output. `--tail N` limits each excerpt to N lines; `--tail 0` hides excerpts. Interactive dashboard runs use color and make the summary path a terminal hyperlink; `NO_COLOR`, plain mode and redirected runs print plain text.
+
+Every run also writes `summary.md` to its run directory: a Markdown table of jobs plus failure details, ready to paste into an issue or chat. When a job fails, SUP copies that report to the clipboard with `pbcopy`, `wl-copy`, `xclip` or `xsel`. Over SSH, or when none of those exist, it sends an OSC 52 escape to an interactive terminal. Set `copy_failure_report = false` under `[run]` or pass `--no-copy` to disable copying.
+
+Cleanup keeps run directories modified today, plus `retention_days` earlier local calendar days. The default `0` keeps only today's runs. Use `--log-retention-days N` to change the window for one run or `--no-log-cleanup` to disable cleanup for a run.
 
 ## Development
 
