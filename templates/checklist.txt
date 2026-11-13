@@ -1,0 +1,12 @@
+{% for job in view.jobs -%}
+{{ " " }}{{ paint.apply(job.rgb, job.icon) }} {{ "{:<1$}"|format(job.name, view.name_width) }}  {{ paint.apply(&MUTED, "{:>7}"|format(job.time)) }}
+{%- if !job.note.is_empty() %}  {{ paint.apply(&MUTED, job.note) }}{% endif %}
+{% endfor -%}
+{{ " " }}{{ paint.apply(&MUTED, view.rule()) }}
+{{ " " }}{{ view.counts }}
+{% if let Some(logs) = view.log_dir -%}
+{{ " " }}{{ paint.apply(&MUTED, "logs   ") }}  {{ logs.short }}
+{% endif -%}
+{% if let Some(summary) = summary -%}
+{{ " " }}{{ paint.apply(&MUTED, "summary") }}  {{ paint.link(summary.full, summary.short) }}
+{% endif -%}

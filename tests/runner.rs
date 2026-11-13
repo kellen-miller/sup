@@ -288,6 +288,12 @@ fn logs_are_private_and_cleanup_does_not_follow_symlinks() {
     let old = runs.join("old");
     std::fs::create_dir(&old).unwrap();
     std::fs::write(old.join("remove"), "old").unwrap();
+    std::fs::File::open(&old)
+        .unwrap()
+        .set_modified(std::time::SystemTime::now() - Duration::from_secs(2 * 86_400))
+        .unwrap();
+    let today = runs.join("today");
+    std::fs::create_dir(&today).unwrap();
     symlink(&target, runs.join("linked")).unwrap();
     let (tx, rx) = mpsc::sync_channel(128);
     let events = thread::spawn(move || rx.into_iter().collect::<Vec<RunEvent>>());
@@ -310,6 +316,7 @@ fn logs_are_private_and_cleanup_does_not_follow_symlinks() {
     );
     assert!(target.join("keep").exists());
     assert!(!old.exists());
+    assert!(today.exists());
 }
 
 #[test]

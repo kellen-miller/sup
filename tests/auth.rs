@@ -29,7 +29,7 @@ fn final_job_completion_overlay_precedes_terminal_exit() {
         assert!(started.elapsed() >= Duration::from_millis(500));
         let output = String::from_utf8_lossy(&run.output);
         assert!(output.contains(overlay), "{output}");
-        assert_eq!(output.contains("Failure report:"), code != 0);
+        assert_eq!(output.contains("last (last) · exit 7"), code != 0);
     }
 }
 
@@ -616,7 +616,7 @@ fn dashboard_password_modal_masks_input_resizes_and_restores_terminal() {
     fixture.jobs(&job("brew", "on-demand", "['brew']"));
     let mut run = PtyRun::spawn(fixture.ui_command());
     assert!(run.finish_tui_prompt(SECRET, Duration::from_secs(5)).success());
-    assert!(String::from_utf8_lossy(&run.output).contains("brew: Succeeded"));
+    assert!(String::from_utf8_lossy(&run.output).contains("✓\x1b[0m brew"));
     let run_directory = fs::read_dir(fixture.home.join(".cache/sup/runs"))
         .unwrap()
         .next()
@@ -680,7 +680,7 @@ fn preflight_is_just_in_time_and_noninteractive_unavailable_optional_jobs_skip()
     let output = bounded_output(fixture.command());
     assert!(output.status.success());
     assert!(
-        String::from_utf8_lossy(&output.stdout).contains("Skipped"),
+        String::from_utf8_lossy(&output.stdout).contains("skipped:"),
         "trace={} stdout={} stderr={}",
         fixture.trace(),
         String::from_utf8_lossy(&output.stdout),
