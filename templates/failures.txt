@@ -1,0 +1,16 @@
+{% for failure in view.failures %}
+{{ " " }}{{ paint.apply(&RED, "✗") }} {{ failure.label }} ({{ failure.name }})
+{%- if let Some(code) = failure.exit_code %} · exit {{ code }}{% endif %} · {{ failure.time }}
+{% if !failure.reason.is_empty() -%}
+{{ "   " }}reason  {{ failure.reason }}
+{% endif -%}
+{% if let Some(log) = failure.log -%}
+{{ "   " }}log     {{ log.short }}
+{% endif -%}
+{% for line in failure.tail -%}
+{{ "   " }}{{ paint.apply(&MUTED, "│") }} {{ line }}
+{% endfor -%}
+{% if let Some(error) = failure.tail_error -%}
+{{ "   " }}{{ error }}
+{% endif -%}
+{% endfor -%}

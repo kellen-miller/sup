@@ -2,14 +2,15 @@ use super::output::OutputParser;
 use crate::clipboard;
 use crate::logs;
 use crate::runner::{JobResult, JobStatus};
+use askama::Template;
 use std::io::{self, Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 const TAIL_BYTES: u64 = 64 * 1024;
-const GREEN: (u8, u8, u8) = (158, 206, 106);
-const RED: (u8, u8, u8) = (247, 118, 142);
-const MUTED: (u8, u8, u8) = (143, 151, 199);
+const GREEN: Rgb = (158, 206, 106);
+const RED: Rgb = (247, 118, 142);
+const MUTED: Rgb = (143, 151, 199);
 
 pub struct SummaryOptions {
     pub home: PathBuf,
@@ -20,73 +21,165 @@ pub struct SummaryOptions {
     pub color: bool,
 }
 
-struct Failure<'a> {
-    result: &'a JobResult,
-    tail: Result<Vec<String>, String>,
+type Rgb = (u8, u8, u8);
+
+/// Display-ready summary data shared by the terminal and Markdown templates.
+struct SummaryView {
+    counts: String,
+    name_width: usize,
+    jobs: Vec<JobRow>,
+    failures: Vec<FailureView>,
+    log_dir: Option<PathView>,
+}
+
+impl SummaryView {
+    fn rule(&self) -> String {
+        "─".repeat(self.name_width + 18)
+    }
+}
+
+struct JobRow {
+    icon: &'static str,
+    rgb: Rgb,
+    name: String,
+    time: String,
+    note: String,
+}
+
+impl JobRow {
+    fn markdown_note(&self) -> String {
+        self.note.replace('|', "\\|")
+    }
+}
+
+struct FailureView {
+    label: String,
+    name: String,
+    exit_code: Option<i32>,
+    time: String,
+    reason: String,
+    log: Option<PathView>,
+    tail: Vec<String>,
+    tail_error: Option<String>,
+}
+
+/// A path as written to Markdown (`full`) and shown in the terminal (`short`, home-relative).
+struct PathView {
+    full: String,
+    short: String,
+}
+
+impl PathView {
+    fn new(path: &Path, home: &Path) -> Self {
+        let short = match path.strip_prefix(home) {
+            Ok(relative) if !home.as_os_str().is_empty() => format!("~/{}", relative.display()),
+            _ => path.display().to_string(),
+        };
+        Self {
+            full: path.display().to_string(),
+            short,
+        }
+    }
+}
+
+#[derive(Template)]
+#[template(path = "summary.md", escape = "none")]
+struct MarkdownTemplate<'a> {
+    view: &'a SummaryView,
+}
+
+#[derive(Template)]
+#[template(path = "checklist.txt", escape = "none")]
+struct ChecklistTemplate<'a> {
+    view: &'a SummaryView,
+    summary: Option<PathView>,
+    paint: Painter,
+}
+
+#[derive(Template)]
+#[template(path = "failures.txt", escape = "none")]
+struct FailuresTemplate<'a> {
+    view: &'a SummaryView,
+    paint: Painter,
 }
 
 /// Prints the end-of-run checklist and failure details, writes `summary.md` into the run directory, and copies the
 /// Markdown report to the clipboard when a job failed and copying is enabled.
 pub fn print_summary(results: &[JobResult], log_dir: Option<&Path>, options: &SummaryOptions) {
-    let failures: Vec<Failure<'_>> = results
-        .iter()
-        .filter(|result| result.status == JobStatus::Failed)
-        .map(|result| Failure {
-            result,
-            tail: match &result.log_path {
-                Some(path) if options.tail_lines > 0 => read_tail(path, options.tail_lines),
-                _ => Ok(Vec::new()),
-            },
-        })
-        .collect();
-    let markdown = render_markdown(results, &failures, log_dir, options.elapsed);
-    let summary_path = log_dir.and_then(|directory| {
-        match logs::create_job_log(directory, logs::SUMMARY_FILE)
-            .and_then(|(path, mut file)| file.write_all(markdown.as_bytes()).map(|()| path))
-        {
-            Ok(path) => Some(path),
-            Err(error) => {
-                eprintln!("sup: cannot write run summary: {error}");
-                None
-            }
-        }
-    });
-
+    let view = SummaryView {
+        counts: count_line(results, options.elapsed),
+        name_width: results.iter().map(|result| result.job.name.len()).max().unwrap_or(0),
+        jobs: results
+            .iter()
+            .map(|result| {
+                let (icon, rgb) = status_mark(&result.status);
+                JobRow {
+                    icon,
+                    rgb,
+                    name: result.job.name.clone(),
+                    time: format_duration(result.elapsed),
+                    note: status_note(result),
+                }
+            })
+            .collect(),
+        failures: results
+            .iter()
+            .filter(|result| result.status == JobStatus::Failed)
+            .map(|result| {
+                let tail = match &result.log_path {
+                    Some(path) if options.tail_lines > 0 => read_tail(path, options.tail_lines),
+                    _ => Ok(Vec::new()),
+                };
+                FailureView {
+                    label: result.job.label.clone(),
+                    name: result.job.name.clone(),
+                    exit_code: result.exit_code,
+                    time: format_duration(result.elapsed),
+                    reason: result.reason.clone(),
+                    log: result
+                        .log_path
+                        .as_deref()
+                        .map(|path| PathView::new(path, &options.home)),
+                    tail_error: tail.as_ref().err().cloned(),
+                    tail: tail.unwrap_or_default(),
+                }
+            })
+            .collect(),
+        log_dir: log_dir.map(|path| PathView::new(path, &options.home)),
+    };
     let paint = Painter { color: options.color };
-    print_checklist(results, log_dir, summary_path.as_deref(), options, paint);
-    for failure in &failures {
-        let result = failure.result;
-        let exit = result
-            .exit_code
-            .map(|code| format!(" · exit {code}"))
-            .unwrap_or_default();
-        eprintln!();
-        eprintln!(
-            " {} {} ({}){exit} · {}",
-            paint.apply(RED, "✗"),
-            result.job.label,
-            result.job.name,
-            format_duration(result.elapsed)
-        );
-        if !result.reason.is_empty() {
-            eprintln!("   reason  {}", result.reason);
-        }
-
-        if let Some(path) = &result.log_path {
-            eprintln!("   log     {}", tilde(path, &options.home));
-        }
-
-        match &failure.tail {
-            Ok(lines) => {
-                for line in lines {
-                    eprintln!("   {} {line}", paint.apply(MUTED, "│"));
+    let rendered = MarkdownTemplate { view: &view }.render().and_then(|markdown| {
+        let summary_path = log_dir.and_then(|directory| {
+            match logs::create_job_log(directory, logs::SUMMARY_FILE)
+                .and_then(|(path, mut file)| file.write_all(markdown.as_bytes()).map(|()| path))
+            {
+                Ok(path) => Some(PathView::new(&path, &options.home)),
+                Err(error) => {
+                    eprintln!("sup: cannot write run summary: {error}");
+                    None
                 }
             }
-            Err(error) => eprintln!("   {error}"),
+        });
+        let checklist = ChecklistTemplate {
+            view: &view,
+            summary: summary_path,
+            paint,
         }
-    }
+        .render()?;
+        let failures = FailuresTemplate { view: &view, paint }.render()?;
+        Ok((markdown, checklist, failures))
+    });
+    let (markdown, checklist, failures) = match rendered {
+        Ok(rendered) => rendered,
+        Err(error) => {
+            eprintln!("sup: cannot render run summary: {error}");
+            return;
+        }
+    };
 
-    if !failures.is_empty() && options.copy_failure_report {
+    print!("{checklist}");
+    eprint!("{failures}");
+    if !view.failures.is_empty() && options.copy_failure_report {
         eprintln!();
         match clipboard::copy(&markdown) {
             Ok(method) => eprintln!(" 📋 failure report copied via {method}"),
@@ -95,118 +188,31 @@ pub fn print_summary(results: &[JobResult], log_dir: Option<&Path>, options: &Su
     }
 }
 
-/// Applies truecolor styling only when the summary targets an interactive terminal.
+/// Applies truecolor styling and OSC 8 links only when the summary targets an interactive terminal.
 #[derive(Clone, Copy)]
 struct Painter {
     color: bool,
 }
 
 impl Painter {
-    fn apply(self, rgb: (u8, u8, u8), text: &str) -> String {
+    fn apply(self, rgb: &Rgb, text: impl std::fmt::Display) -> String {
         if self.color {
             format!("\x1b[38;2;{};{};{}m{text}\x1b[0m", rgb.0, rgb.1, rgb.2)
+        } else {
+            text.to_string()
+        }
+    }
+
+    fn link(self, target: &str, text: &str) -> String {
+        if self.color {
+            format!("\x1b]8;;file://{target}\x1b\\{text}\x1b]8;;\x1b\\")
         } else {
             text.to_owned()
         }
     }
 }
 
-fn print_checklist(
-    results: &[JobResult],
-    log_dir: Option<&Path>,
-    summary_path: Option<&Path>,
-    options: &SummaryOptions,
-    paint: Painter,
-) {
-    let width = results.iter().map(|result| result.job.name.len()).max().unwrap_or(0);
-    for result in results {
-        let (icon, rgb) = status_mark(&result.status);
-        let time = paint.apply(MUTED, &format!("{:>7}", format_duration(result.elapsed)));
-        let note = status_note(result);
-        if note.is_empty() {
-            println!(" {} {:<width$}  {time}", paint.apply(rgb, icon), result.job.name);
-        } else {
-            println!(
-                " {} {:<width$}  {time}  {}",
-                paint.apply(rgb, icon),
-                result.job.name,
-                paint.apply(MUTED, &note)
-            );
-        }
-    }
-
-    println!(" {}", paint.apply(MUTED, &"─".repeat(width + 18)));
-    println!(" {}", count_line(results, options.elapsed));
-    if let Some(directory) = log_dir {
-        println!(
-            " {}  {}",
-            paint.apply(MUTED, "logs   "),
-            tilde(directory, &options.home)
-        );
-    }
-
-    if let Some(path) = summary_path {
-        let shown = tilde(path, &options.home);
-        if options.color {
-            println!(
-                " {}  \x1b]8;;file://{}\x1b\\{shown}\x1b]8;;\x1b\\",
-                paint.apply(MUTED, "summary"),
-                path.display()
-            );
-        } else {
-            println!(" {}  {shown}", paint.apply(MUTED, "summary"));
-        }
-    }
-}
-
-fn render_markdown(
-    results: &[JobResult],
-    failures: &[Failure<'_>],
-    log_dir: Option<&Path>,
-    elapsed: Duration,
-) -> String {
-    let mut text = format!("# sup run: {}\n\n", count_line(results, elapsed));
-    text.push_str("| | Job | Time | Note |\n| --- | --- | ---: | --- |\n");
-    for result in results {
-        text.push_str(&format!(
-            "| {} | {} | {} | {} |\n",
-            status_mark(&result.status).0,
-            result.job.name,
-            format_duration(result.elapsed),
-            status_note(result).replace('|', "\\|")
-        ));
-    }
-
-    if let Some(directory) = log_dir {
-        text.push_str(&format!("\nLogs: `{}`\n", directory.display()));
-    }
-
-    for failure in failures {
-        let result = failure.result;
-        text.push_str(&format!("\n## ✗ {} (`{}`)\n\n", result.job.label, result.job.name));
-        if let Some(code) = result.exit_code {
-            text.push_str(&format!("- Exit code: {code}\n"));
-        }
-
-        if !result.reason.is_empty() {
-            text.push_str(&format!("- Reason: {}\n", result.reason));
-        }
-
-        if let Some(path) = &result.log_path {
-            text.push_str(&format!("- Log: `{}`\n", path.display()));
-        }
-
-        match &failure.tail {
-            Ok(lines) if !lines.is_empty() => text.push_str(&format!("\n````text\n{}\n````\n", lines.join("\n"))),
-            Ok(_) => {}
-            Err(error) => text.push_str(&format!("- {error}\n")),
-        }
-    }
-
-    text
-}
-
-fn status_mark(status: &JobStatus) -> (&'static str, (u8, u8, u8)) {
+fn status_mark(status: &JobStatus) -> (&'static str, Rgb) {
     match status {
         JobStatus::Succeeded => ("✓", GREEN),
         JobStatus::Failed => ("✗", RED),
@@ -249,13 +255,6 @@ fn format_duration(duration: Duration) -> String {
         format!("{}m {:02}s", seconds / 60, seconds % 60)
     } else {
         format!("{:.1}s", duration.as_secs_f64())
-    }
-}
-
-fn tilde(path: &Path, home: &Path) -> String {
-    match path.strip_prefix(home) {
-        Ok(relative) if !home.as_os_str().is_empty() => format!("~/{}", relative.display()),
-        _ => path.display().to_string(),
     }
 }
 

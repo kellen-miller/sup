@@ -65,6 +65,8 @@ After all jobs finish, SUP prints a checklist with each job's status, duration a
 
 Every run also writes `summary.md` to its run directory: a Markdown table of jobs plus failure details, ready to paste into an issue or chat. When a job fails, SUP copies that report to the clipboard with `pbcopy`, `wl-copy`, `xclip` or `xsel`. Over SSH, or when none of those exist, it sends an OSC 52 escape to an interactive terminal. Set `copy_failure_report = false` under `[run]` or pass `--no-copy` to disable copying.
 
+The checklist, failure blocks and `summary.md` layouts live in [templates/](templates/) as [Askama](https://askama.rs) templates, compiled and type-checked at build time.
+
 Cleanup keeps run directories modified today, plus `retention_days` earlier local calendar days. The default `0` keeps only today's runs. Use `--log-retention-days N` to change the window for one run or `--no-log-cleanup` to disable cleanup for a run.
 
 ## Development
