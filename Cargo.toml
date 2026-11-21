@@ -11,7 +11,7 @@ serde = { version = "1", features = ["derive"] }
 toml = "1.0"
 serde-saphyr = { version = "2", default-features = false, features = ["deserialize"] }
 libc = "0.2"
-nix = { version = "0.31", features = ["socket", "user", "resource", "term"] }
+nix = { version = "0.32", features = ["socket", "user", "resource", "term"] }
 zeroize = "1.9"
 getrandom = "0.4"
 tempfile = "3"
