@@ -41,31 +41,13 @@ fn validate_channels() -> i32 {
 }
 
 fn remove_obsolete_toolchains() -> i32 {
-    let installed = match Command::new("rustup")
-        .args(["toolchain", "list"])
-        .stdin(Stdio::null())
-        .output()
-    {
-        Ok(output) if output.status.success() => String::from_utf8_lossy(&output.stdout).into_owned(),
-        Ok(output) => {
-            eprint!("{}", String::from_utf8_lossy(&output.stderr));
-            return output.status.code().unwrap_or(1);
-        }
-        Err(error) => {
-            eprintln!("sup-rust-update: cannot list toolchains: {error}");
-            return 1;
-        }
+    let installed = match rustup_stdout(&["toolchain", "list"], "list toolchains") {
+        Ok(stdout) => stdout,
+        Err(code) => return code,
     };
-    let default = match Command::new("rustup").arg("default").stdin(Stdio::null()).output() {
-        Ok(output) if output.status.success() => String::from_utf8_lossy(&output.stdout).into_owned(),
-        Ok(output) => {
-            eprint!("{}", String::from_utf8_lossy(&output.stderr));
-            return output.status.code().unwrap_or(1);
-        }
-        Err(error) => {
-            eprintln!("sup-rust-update: cannot inspect default toolchain: {error}");
-            return 1;
-        }
+    let default = match rustup_stdout(&["default"], "inspect default toolchain") {
+        Ok(stdout) => stdout,
+        Err(code) => return code,
     };
     let installed_names: Vec<&str> = installed
         .lines()
@@ -92,20 +74,9 @@ fn remove_obsolete_toolchains() -> i32 {
     }
     // A rust-toolchain.toml in the working directory pins the active toolchain; other sup jobs
     // inherit that directory, so removing it forces concurrent re-downloads that race in rustup.
-    let active = match Command::new("rustup")
-        .args(["show", "active-toolchain"])
-        .stdin(Stdio::null())
-        .output()
-    {
-        Ok(output) if output.status.success() => String::from_utf8_lossy(&output.stdout).into_owned(),
-        Ok(output) => {
-            eprint!("{}", String::from_utf8_lossy(&output.stderr));
-            return output.status.code().unwrap_or(1);
-        }
-        Err(error) => {
-            eprintln!("sup-rust-update: cannot inspect active toolchain: {error}");
-            return 1;
-        }
+    let active = match rustup_stdout(&["show", "active-toolchain"], "inspect active toolchain") {
+        Ok(stdout) => stdout,
+        Err(code) => return code,
     };
     let active_name = active.split_whitespace().next().unwrap_or_default();
     for name in installed_names {
@@ -126,6 +97,21 @@ fn remove_obsolete_toolchains() -> i32 {
         }
     }
     0
+}
+
+/// Runs a read-only rustup query; on failure, reports rustup's stderr and returns its exit code.
+fn rustup_stdout(args: &[&str], action: &str) -> Result<String, i32> {
+    match Command::new("rustup").args(args).stdin(Stdio::null()).output() {
+        Ok(output) if output.status.success() => Ok(String::from_utf8_lossy(&output.stdout).into_owned()),
+        Ok(output) => {
+            eprint!("{}", String::from_utf8_lossy(&output.stderr));
+            Err(output.status.code().unwrap_or(1))
+        }
+        Err(error) => {
+            eprintln!("sup-rust-update: cannot {action}: {error}");
+            Err(1)
+        }
+    }
 }
 
 fn numbered(name: &str) -> bool {
