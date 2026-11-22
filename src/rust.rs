@@ -90,8 +90,26 @@ fn remove_obsolete_toolchains() -> i32 {
             }
         }
     }
+    // A rust-toolchain.toml in the working directory pins the active toolchain; other sup jobs
+    // inherit that directory, so removing it forces concurrent re-downloads that race in rustup.
+    let active = match Command::new("rustup")
+        .args(["show", "active-toolchain"])
+        .stdin(Stdio::null())
+        .output()
+    {
+        Ok(output) if output.status.success() => String::from_utf8_lossy(&output.stdout).into_owned(),
+        Ok(output) => {
+            eprint!("{}", String::from_utf8_lossy(&output.stderr));
+            return output.status.code().unwrap_or(1);
+        }
+        Err(error) => {
+            eprintln!("sup-rust-update: cannot inspect active toolchain: {error}");
+            return 1;
+        }
+    };
+    let active_name = active.split_whitespace().next().unwrap_or_default();
     for name in installed_names {
-        if !numbered(name) {
+        if !numbered(name) || name == active_name {
             continue;
         }
         let status = Command::new("rustup")
