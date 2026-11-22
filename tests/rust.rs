@@ -89,3 +89,40 @@ fn numbered_default_switches_before_any_uninstall() {
     assert!(switch < uninstall);
     assert!(!calls.contains("toolchain uninstall custom-local"));
 }
+
+#[test]
+fn active_numbered_toolchain_is_kept() {
+    let directory = tempfile::tempdir().unwrap();
+    fake_rustup(
+        directory.path(),
+        "case \"$1 $2\" in 'toolchain list') printf 'stable-x86_64-unknown-linux-gnu (default)\\n1.99.1-x86_64-unknown-linux-gnu\\n1.80.0-x86_64-unknown-linux-gnu\\n' ;; 'default ') printf 'stable-x86_64-unknown-linux-gnu\\n' ;; 'show active-toolchain') printf '1.99.1-x86_64-unknown-linux-gnu (overridden by rust-toolchain.toml)\\n' ;; esac",
+    );
+    let calls = directory.path().join("calls");
+    let output = Command::new(env!("CARGO_BIN_EXE_sup-rust-update"))
+        .env("PATH", directory.path())
+        .env("RUSTUP_CALLS", &calls)
+        .output()
+        .unwrap();
+    assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+    let calls = std::fs::read_to_string(calls).unwrap();
+    assert!(calls.contains("toolchain uninstall 1.80.0-x86_64-unknown-linux-gnu"));
+    assert!(!calls.contains("toolchain uninstall 1.99.1-"));
+}
+
+#[test]
+fn failed_active_toolchain_lookup_never_uninstalls_toolchains() {
+    let directory = tempfile::tempdir().unwrap();
+    fake_rustup(
+        directory.path(),
+        "case \"$1 $2\" in 'toolchain list') printf 'stable-x86_64-unknown-linux-gnu (default)\\n1.80.0-x86_64-unknown-linux-gnu\\n' ;; 'default ') printf 'stable-x86_64-unknown-linux-gnu\\n' ;; 'show active-toolchain') exit 7 ;; esac",
+    );
+    let calls = directory.path().join("calls");
+    let output = Command::new(env!("CARGO_BIN_EXE_sup-rust-update"))
+        .env("PATH", directory.path())
+        .env("RUSTUP_CALLS", &calls)
+        .output()
+        .unwrap();
+    assert_eq!(output.status.code(), Some(7));
+    let calls = std::fs::read_to_string(calls).unwrap();
+    assert!(!calls.contains("toolchain uninstall"));
+}
